@@ -300,6 +300,7 @@ def main():
         LarkReporter(cfg['lark_bot_url']).post(content)
 
     # infer
+    print("------------------------infer-------------------------")
     if args.mode in ['all', 'infer']:
         # When user have specified --slurm or --dlc, or have not set
         # "infer" in config, we will provide a default configuration
@@ -339,6 +340,7 @@ def main():
         runner(tasks)
 
     # evaluate
+    print("------------------------evaluate-------------------------")
     if args.mode in ['all', 'eval']:
         # When user have specified --slurm or --dlc, or have not set
         # "eval" in config, we will provide a default configuration

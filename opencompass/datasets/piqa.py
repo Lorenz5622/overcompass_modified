@@ -26,7 +26,7 @@ class PIQADataset(BaseDataset):
         for data, label in zip(data_lines, label_lines):
             i = json.loads(data.strip())
             i['label'] = int(label.strip())
-            del i['id']
+            # del i['id']
             dataset.append(i)
 
         return Dataset.from_list(dataset)

@@ -255,3 +255,55 @@ class Llama2Chat(BaseModel):
 
     def get_token_len(self, prompt: str) -> int:
         return len(self.tokenizer.encode(prompt, bos=True, eos=True)) + 100
+
+
+class DynamicMoE(Llama2):
+    def __init__(
+        self,
+        path: str,
+        max_seq_len: int = 2048,
+        max_batch_size: int = 16,
+        tokenizer_only: bool = False,
+        tokenizer_path: Optional[str] = None,
+        meta_template: Optional[Dict] = None,
+        model_kwargs: Optional[Dict] = None,
+    ):  # noqa
+        self._load_tokenizer(tokenizer_path=tokenizer_path)
+        self._load_model(
+            path=path,
+            max_seq_len=max_seq_len,
+            max_batch_size=max_batch_size,
+            model_kwargs=model_kwargs,
+            tokenizer_path=tokenizer_path,
+        )
+        self.model.tokenizer = self.tokenizer
+        self.max_seq_len = max_seq_len
+        self.template_parser = APITemplateParser(meta_template)
+        self.logger = get_logger()
+
+    def _load_model(
+        self, path, max_seq_len, max_batch_size, model_kwargs, tokenizer_path=None
+    ):
+        # from Dynamic_MoE.modeling.modeling_moe_ori import MoEForCausalLM
+        from Dynamic_MoE.modeling.modeling_moe import MoEForCausalLM
+        from Dynamic_MoE.modeling.configuration_moe import MoEConfig
+
+        model_config = MoEConfig.from_pretrained(path, trust_remote_code=True)
+        self.model = MoEForCausalLM.from_pretrained(
+            path,
+            from_tf=False,
+            config=model_config,
+            # torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            **model_kwargs,
+        ).cuda()
+        self.model.eval()
+
+    def _load_tokenizer(self, tokenizer_path):
+        from transformers import LlamaTokenizer
+
+        self.tokenizer = LlamaTokenizer.from_pretrained(tokenizer_path)
+        self.tokenizer.pad_token = self.tokenizer.unk_token
+
+    def get_token_len(self, prompt: str) -> int:
+        return len(self.tokenizer.encode(prompt))
