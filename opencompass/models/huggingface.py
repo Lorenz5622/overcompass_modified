@@ -451,8 +451,9 @@ class HuggingFace(BaseModel):
                 max_length=self.max_seq_len)['input_ids']
             input_ids = torch.tensor(input_ids, device=self.model.device)
             tokens = {'input_ids': input_ids}
-
-            outputs = self.model(input_ids, dynamic_k=[2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2])
+            # outputs = self.model(input_ids, dynamic_k=[1,2,1,2,4,5,5,6,7,5,2,1,7,1,3,6,5,6,8,7,8,1,4,3,5,1,8,0,4,5,7,2])
+            # 历史记录：4,2,4,2,3,1,2,1,2,1,4,0,1,1,2,2,1,0,1,1,0,2,4,1,4,2,2,3,3,3,1,1
+            outputs = self.model(input_ids, dynamic_k=[3,1,1,1,1,1,2,3,3,4,2,0,3,0,3,1,0,2,3,1,1,3,4,0,1,0,4,4,3,3,3,1])
         return outputs[0], {'tokens': tokens}
 
     def get_ppl(self,
@@ -864,8 +865,9 @@ class HuggingFaceDynamicMoE(HuggingFace):
             max_new_tokens=max_out_len,
             top_p=0.9,
             temperature=1.0,
-            do_sample=True,
-            dynamic_k=[2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+            # do_sample=True,
+            # dynamic_k=[2,0,6,7,3,6,4,7,7,4,1,3,6,2,7,5,5,4,1,4,2,5,1,4,2,7,7,7,1,0,5,7],
+            dynamic_k=[1,0,1,1,3,1,1,1,1,1,1,1,1,1,1,1,1,1,1,4,2,5,1,4,2,7,7,7,1,0,5,7],
         )
         outputs = self.tokenizer.batch_decode(
             generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
