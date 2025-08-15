@@ -1,6 +1,6 @@
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=2
 
 python run.py \
-    --datasets piqa_ppl \
+    --datasets hellaswag_ppl \
     --models dynamic_moe \
     --debug
