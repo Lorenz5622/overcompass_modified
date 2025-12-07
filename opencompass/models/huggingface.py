@@ -429,7 +429,7 @@ class HuggingFace(BaseModel):
         return decodeds
 
     def get_logits(self, inputs: List[str]):
-        print(f"inputs: {inputs}")
+        # print(f"inputs: {inputs}")
         if self.batch_padding and len(inputs) > 1:
             # batch inference
             tokens = self.tokenizer(inputs,
@@ -481,8 +481,42 @@ class HuggingFace(BaseModel):
             # 3,0,0,3,1,4,4,2,4,2,1,1,1,1,3,1,1,0,0,0,0,3,0,2,2,2,0,4,0,1,0,0       0.3 0.0013     55.17
             # 3 2 2 1 1 2 0 0 0 0 3 1 0 0 1 1 0 1 2 0 0 2 0 0 0 0 0 0 0 4 0 1       0.5 0.0015     只计算随后一层 51.63
             # [3 2 2 1 1 2 0 0 0 1 3 1 0 0 1 1 0 1 2 0 0 2 0 0 0 0 0 0 0 4 0 1]     0.5 0.0015     只计算随后一层 53.10
-            outputs = self.model(input_ids, dynamic_k=[3,2,2,1,1,2,0,0,0,1,3,1,0,0,1,1,0,1,2,0,0,2,0,0,0,0,0,0,0,4,0,1])
-            print(f"outputs[0]:{outputs[0].shape}")
+            # 4 1 1 1 4 1 2 1 2 4 1 2 2 3 1 4 2 1 1 4 4 2 4 4 4 2 1 0 4 4 2 1]      同上，更新了模型loss计算方法  
+            # [3 1 4 3 2 2 4 3 2 2 3 4 2 3 3 3 2 4 1 2 1 4 3 4 2 2 4 0 0 4 3 1] 0.5 0.003     只计算随后一层       
+            # 3 0 4 1 3 4 3 1 3 1 1 4 3 2 2 1 3 4 3 1 4 1 1 4 2 3 1 2 4 0 4 4       0.5 0.03       只计算随后一层  65.18
+            # 3 4 1 1 4 1 4 2 3 2 4 5 1 4 3 4 0 1 4 4 4 4 0 3 4 2 0 5 2 2 1 2       0.5 0.1        只计算随后一层  66.21
+            # 2 4 4 3 3 1 2 1 3 1 3 1 4 3 1 3 1 3 3 2 3 3 2 4 3 3 3 3 3 3 0 4       
+            # 3 1 6 2 3 6 6 1 5 4 7 5 3 2 7 4 2 5 7 3 4 4 6 3 2 4 0 3 0 6 6 7       0.5 0.4        只计算随后一层  67.95
+            # 6 6 6 2 3 3 5 3 5 1 4 5 7 3 3 1 7 5 3 1 0 6 6 7 6 0 2 3 5 4 5 7       0.5 0.4        只计算随后一层，无调用专家个数的loss
+            # 6 0 7 5 3 6 7 4 6 4 2 1 7 6 6 6 1 4 6 2 5 4 4 1 7 5 5 4 7 3 4 5      0.5 0.4          只计算随后一层，无调用专家个数的loss 修改了loss计算方式  64.31
+            # 6 0 7 5 1 6 2 4 6 4 2 1 7 6 6 6 1 4 6 2 5 4 4 1 7 5 5 4 7 3 4 5
+            # 7 6 6 5 3 8 7 6 4 4 7 3 4 8 1 7 3 3 2 7 4 5 5 6 7 2 2 1 3 5 8 3       0.5 0.02
+            # 8 6 8 2 1 7 1 1 5 5 2 3 8 8 2 5 4 5 3 3 2 7 5 4 0 5 6 2 0 7 8 2       0.05 0.01      68.01
+            # 7 1 3 5 5 8 7 0 5 7 6 5 2 3 1 4 3 6 6 1 6 6 3 5 6 2 2 1 1 1 3 8       0.7  0.01
+            # [7 7 1 2 4 4 5 5 3 5 6 7 2 4 1 4 2 6 4 4 6 5 5 3 1 6 4 5 1 1 6 1]     0.9  0.05 loss使用三次平均
+            # [7 7 1 3 4 3 6 5 3 5 6 7 3 4 1 4 1 6 3 4 5 6 5 3 1 6 4 6 1 1 6 1]     0.9  0.05 loss使用三次平均
+            # 3 5 2 5 7 5 4 1 2 3 1 5 6 3 3 3 7 6 4 3 5 6 1 2 0 5 2 3 2 1 1 3
+            # 3 0 1 7 5 4 3 5 1 6 7 7 3 4 3 7 4 2 6 1 6 4 1 5 1 5 3 0 4 3 5 3       0.5  0.03  取15次平均  64.42
+            # 3 1 1 7 4 5 4 5 2 7 7 7 4 4 3 6 3 2 4 2 6 4 1 5 1 5 2 1 3 3 4 3       0.5  0.03  取15次平均  68.12
+            # 4 5 6 4 5 6 3 1 5 4 1 2 3 2 1 2 7 7 3 3 4 1 6 4 7 6 3 6 5 3 3 5       0.5  0.03  取20次平均  68.12
+            # 7 1 6 7 6 5 6 1 6 2 4 7 1 3 6 5 6 6 5 5 5 3 5 3 0 7 5 0 5 1 3 0       0.5  0.03  取50次平均  67
+            # 1 0 2 2 1 6 3 6 2 2 1 2 1 7 5 1 3 5 3 3 5 6 2 4                       0.5  0.03  提取20个作为数据集 64.53
+            # 1 0 7 2 2 2 2 2 5 2 7 5 4 5 5 4 2 7 1 5 5 5 1 5                       0.5  0.03  提取60%数据训练    64.85
+            # 7 7 6 6 4 1 2 6 3 6 6 2 0 6 6 4 2 7 1 1 5 6 1 5                       0.5  0.03  提取60%数据训练    
+            # 2 0 5 1 5 1 5 2 3 4 4 4 1 5 3 6 5 2 6 5 6 5 7 6
+            # 1 0 5 1 4 2 7 4 2 3 1 4 7 4 5 3 5 3 6 4 4 3 4 7
+            # 0 6 3 1 6 2 3 7 7 6 6 7 5 4 3 3 4 5 4 4 6 5 0 1
+            # 4,3,7,0,0,4,4,5,2,0,5,7,0,0,4,7,5,3,4,0,0,6,1,3
+            # 1 0 6 1 6 5 4 4 5 2 3 5 7 5 6 4 2 7 3 6 4 6 1 4
+            # 1 0 2 6 6 6 3 4 5 5 5 4 1 6 7 7 4 7 7 3 4 6 1 3                       65.18
+            # 1 0 1 1 4 4 6 2 3 4 1 5 4 6 4 2 3 5 5 2 6 5 1 2                       65.07
+            # 1 0 1 1 4 2 7 2 4 5 1 5 7 7 5 2 3 5 6 2 7 5 1 2                       64.69
+            # 1 0 1 1 3 3 5 4 5 4 7 7 7 7 7 5 3 1 7 7 7 6 1 3                       65
+            # 1,1,5,4,5,5,6,1,4,4,6,6,5,4,2,6,6,5,5,6,5,3,1,1                       68.39
+            # outputs = self.model(input_ids, dynamic_k=[1,1,5,4,5,5,6,1,4,4,6,6,5,4,2,6,6,5,5,6,5,3,1,1])
+            outputs = self.model(input_ids)
+            # print(f"outputs[0]:{outputs[0].shape}")
+            # print(f"input_ids : {input_ids.shape}")
         return outputs[0], {'tokens': tokens}
 
     def get_ppl(self,
@@ -530,9 +564,9 @@ class HuggingFace(BaseModel):
 
         outputs, inputs = self.get_logits(inputs)
         shift_logits = outputs[..., :-1, :].contiguous().float()
-
+        # print(f"shift_logits: {shift_logits.shape}")
         shift_labels = inputs['tokens']['input_ids'][..., 1:].contiguous()
-
+        # print(f"shift_labels: {shift_labels.shape}")
         loss_fct = torch.nn.CrossEntropyLoss(
             reduction='none', ignore_index=self.tokenizer.pad_token_id)
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)),
@@ -860,9 +894,11 @@ class HuggingFaceDynamicMoE(HuggingFace):
 
         from transformers import LlamaTokenizer
         # from Dynamic_MoE.modeling.modeling_moe_ori import MoEForCausalLM
-        from Dynamic_MoE.modeling.modeling_moe import MoEForCausalLM
-        from Dynamic_MoE.modeling.configuration_moe import MoEConfig
-
+        from ADAK.modeling.modeling_moe_adak import MoEForCausalLM
+        from ADAK.modeling.configuration_moe import MoEConfig
+        # from Dynamic_MoE.modeling.modeling_moe_adak import MoEForCausalLM
+        # from Dynamic_MoE.modeling.configuration_moe import MoEConfig
+        
         self.tokenizer = LlamaTokenizer.from_pretrained(path)
         self.tokenizer.pad_token = self.tokenizer.unk_token
 

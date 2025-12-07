@@ -16,7 +16,7 @@ from opencompass.utils import (LarkReporter, get_logger, read_from_station,
                                save_to_station)
 from opencompass.utils.run import (fill_eval_cfg, fill_infer_cfg,
                                    get_config_from_arg)
-
+import os
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Run an evaluation task')
