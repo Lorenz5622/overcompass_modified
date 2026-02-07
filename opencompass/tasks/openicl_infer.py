@@ -88,6 +88,16 @@ class OpenICLInferTask(BaseTask):
                     continue
                 self._inference()
 
+        # === [NEW] 保存专家使用统计（在所有推理完成后） ===
+        if hasattr(self.model, 'save_expert_usage_stats'):
+            try:
+                model_abbr = model_abbr_from_cfg(model_cfg)
+                stats_path = f'./expert_usage_stats_{model_abbr}.json'
+                self.model.save_expert_usage_stats(stats_path)
+                self.logger.info(f'Expert usage stats saved to {stats_path}')
+            except Exception as e:
+                self.logger.debug(f'Failed to save expert usage stats: {e}')
+
     def _inference(self):
         self.logger.info(
             f'Start inferencing {task_abbr_from_cfg(self.sub_cfg)}')

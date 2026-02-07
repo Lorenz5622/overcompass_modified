@@ -386,6 +386,17 @@ def main():
         else:
             runner(tasks)
 
+    # === [NEW] 保存专家调用统计（仅 Predict MoE） ===
+    if args.mode in ['all', 'infer']:
+        try:
+            # 尝试从已加载的模型中保存统计信息
+            if hasattr(runner, 'cur_model') and hasattr(runner.cur_model, 'save_expert_usage_stats'):
+                model_abbr = getattr(runner.cur_model, 'abbr', 'unknown')
+                stats_path = f'./expert_usage_stats_{model_abbr}.json'
+                runner.cur_model.save_expert_usage_stats(stats_path)
+        except Exception as e:
+            logger.debug(f"Failed to save expert usage stats: {e}")
+
     # save to station
     if args.station_path is not None or cfg.get('station_path') is not None:
         save_to_station(cfg, args)

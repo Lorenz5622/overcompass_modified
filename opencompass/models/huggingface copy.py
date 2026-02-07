@@ -812,211 +812,6 @@ class HuggingFaceDynamicMoE(HuggingFace):
         mode: str = "none",
         num_extra_tokens: int = 50,
     ):
-        # ⚠️ 关键：在调用父类 __init__ 之前提取并移除自定义参数
-        # 避免这些参数被传递到 HuggingFace 的模型加载函数
-        enable_expert_stats = model_kwargs.pop('enable_expert_stats', False)
-        expert_stats_path = model_kwargs.pop('expert_stats_path', './expert_usage_stats.json')
-        
-        super().__init__(
-            path=path,
-            hf_cache_dir=hf_cache_dir,
-            max_seq_len=max_seq_len,
-            tokenizer_path=tokenizer_path,
-            tokenizer_kwargs=tokenizer_kwargs,
-            peft_path=peft_path,
-            tokenizer_only=tokenizer_only,
-            generation_kwargs=generation_kwargs,
-            model_kwargs=model_kwargs,
-            meta_template=meta_template,
-            extract_pred_after_decode=extract_pred_after_decode,
-            batch_padding=batch_padding,
-            pad_token_id=pad_token_id,
-            mode=mode,
-        )
-
-        import os
-        import sys
-
-        from transformers import LlamaTokenizer
-
-        # 将模型目录和其子目录加入 sys.path，避免动态 MoE 包因路径差异导入失败
-        moe_root = os.path.abspath(path)
-        print(f"----------path: {path} -------------------")
-        moe_inner = os.path.join(moe_root, "Predict_MoE")
-        for candidate in (moe_root, moe_inner):
-            if os.path.isdir(candidate) and candidate not in sys.path:
-                sys.path.append(candidate)
-
-        import importlib
-        # 兼容两种包结构的导入路径
-        try:
-            # e.g. {path}/Dynamic_MoE/modeling/...
-            moe_module = importlib.import_module(
-                "Predict_MoE.modeling.modeling_moe_ori"
-            )
-            cfg_module = importlib.import_module(
-                "Predict_MoE.modeling.configuration_moe"
-            )
-        except ImportError as e:
-            # 这里直接报错，方便调试，而不是再去导入一个不存在的路径
-            raise ImportError(
-                "Cannot import Dynamic_MoE modules. "
-                "Please make sure Dynamic_MoE is installed in the current environment "
-                "and can be imported as 'import Dynamic_MoE'. "
-                f"Original error: {e}"
-            )
-        print(f"modeling moe is : modeling moe ori, path = {path}")
-        MoEForCausalLM = getattr(moe_module, "MoEForCausalLM")
-        MoEConfig = getattr(cfg_module, "MoEConfig")
-        
-        self.tokenizer = LlamaTokenizer.from_pretrained(path)
-        self.tokenizer.pad_token = self.tokenizer.unk_token
-
-        model_config = MoEConfig.from_pretrained(path, trust_remote_code=True)
-        # 将统计功能配置传递给 MoE config
-        if enable_expert_stats:
-            setattr(model_config, "enable_expert_stats", True)
-        
-        self.model = MoEForCausalLM.from_pretrained(
-            path,
-            from_tf=False,
-            config=model_config,
-            torch_dtype=torch.float16,
-            low_cpu_mem_usage=True,
-        ).cuda()
-        self.model.eval()
-        
-        # 检测是否为 modeling_moe_infer（Predict MoE），启用统计功能
-        self.is_predict_moe = "modeling_moe_infer" in moe_module.__name__
-        if self.is_predict_moe and enable_expert_stats:
-            print("[INFO] Detected Predict MoE model, enabling expert usage statistics")
-            self._stats_output_path = expert_stats_path
-
-    def generate(
-        self,
-        inputs: List[PromptType],
-        max_out_len: int = 512,
-        **kwargs,
-    ) -> str:
-        tokens = self.tokenizer(
-            inputs,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=self.max_seq_len,
-        )
-        input_ids = tokens.input_ids.cuda()
-        print("generate")
-        generate_ids = self.model.generate(
-            inputs=input_ids,
-            num_beams=1,
-            bos_token_id=self.tokenizer.bos_token_id,
-            eos_token_id=self.tokenizer.eos_token_id,
-            pad_token_id=self.tokenizer.pad_token_id,
-            max_new_tokens=max_out_len,
-            top_p=0.9,
-            temperature=1.0,
-            # do_sample=True,
-            # dynamic_k=[2,0,6,7,3,6,4,7,7,4,1,3,6,2,7,5,5,4,1,4,2,5,1,4,2,7,7,7,1,0,5,7],
-        )
-        outputs = self.tokenizer.batch_decode(
-            generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )
-        response = [outputs[i][len(inputs[i]) :] for i in range(len(outputs))][0]
-        return response
-    
-    def get_expert_usage_stats(self):
-        """收集所有层的专家使用统计（仅在 Predict MoE 中生效）"""
-        if not getattr(self, 'is_predict_moe', False):
-            return None
-        
-        if not hasattr(self.model, 'model') or not hasattr(self.model.model, 'layers'):
-            return None
-        
-        stats = {
-            'model_type': 'predict_moe',
-            'per_layer': [],
-            'global_avg_k': 0.0,
-            'total_tokens': 0
-        }
-        
-        total_k_sum = 0
-        for idx, layer in enumerate(self.model.model.layers):
-            if hasattr(layer.mlp, 'get_expert_usage_stats'):
-                layer_stats = layer.mlp.get_expert_usage_stats()
-                if layer_stats and layer_stats['total_tokens'] > 0:
-                    stats['per_layer'].append({
-                        'layer_idx': idx,
-                        **layer_stats
-                    })
-                    total_k_sum += layer_stats['avg_k'] * layer_stats['total_tokens']
-                    stats['total_tokens'] += layer_stats['total_tokens']
-        
-        if stats['total_tokens'] > 0:
-            stats['global_avg_k'] = total_k_sum / stats['total_tokens']
-        
-        return stats
-    
-    def save_expert_usage_stats(self, output_path=None):
-        """保存专家使用统计到文件"""
-        if not getattr(self, 'is_predict_moe', False):
-            print("[WARN] Not a Predict MoE model, skipping stats saving")
-            return
-        
-        stats = self.get_expert_usage_stats()
-        if stats is None:
-            print("[WARN] No expert usage statistics collected (stats is None)")
-            return
-        
-        if stats.get('total_tokens', 0) == 0:
-            print("[WARN] No tokens processed yet, cannot save statistics")
-            return
-        
-        if output_path is None:
-            output_path = getattr(self, '_stats_output_path', './expert_usage_stats.json')
-        
-        import json
-        with open(output_path, 'w') as f:
-            json.dump(stats, f, indent=2)
-        print(f"[INFO] Expert usage stats saved to {output_path}")
-        print(f"[INFO] Global average experts per token: {stats['global_avg_k']:.2f}")
-    
-    def reset_expert_usage_stats(self):
-        """重置所有层的统计信息"""
-        if not getattr(self, 'is_predict_moe', False):
-            return
-        
-        if hasattr(self.model, 'model') and hasattr(self.model.model, 'layers'):
-            for layer in self.model.model.layers:
-                if hasattr(layer.mlp, 'reset_expert_usage_stats'):
-                    layer.mlp.reset_expert_usage_stats()
-
-
-class HuggingFacePredictMoE(HuggingFace):
-
-    def __init__(
-        self,
-        path: str,
-        hf_cache_dir: Optional[str] = None,
-        max_seq_len: int = 2048,
-        tokenizer_path: Optional[str] = None,
-        tokenizer_kwargs: dict = dict(),
-        peft_path: Optional[str] = None,
-        tokenizer_only: bool = False,
-        model_kwargs: dict = dict(device_map="auto"),
-        generation_kwargs: dict = dict(),
-        meta_template: Optional[Dict] = None,
-        extract_pred_after_decode: bool = False,
-        batch_padding: bool = False,
-        pad_token_id: Optional[int] = None,
-        mode: str = "none",
-        num_extra_tokens: int = 50,
-    ):
-        # ⚠️ 关键：在调用父类 __init__ 之前提取并移除自定义参数
-        # 避免这些参数被传递到 HuggingFace 的模型加载函数
-        enable_expert_stats = model_kwargs.pop('enable_expert_stats', False)
-        expert_stats_path = model_kwargs.pop('expert_stats_path', './expert_usage_stats.json')
-        
         super().__init__(
             path=path,
             hf_cache_dir=hf_cache_dir,
@@ -1065,7 +860,7 @@ class HuggingFacePredictMoE(HuggingFace):
                 "and can be imported as 'import Dynamic_MoE'. "
                 f"Original error: {e}"
             )
-        print(f"modeling moe is : modeling moe infer, path = {path}")
+        
         MoEForCausalLM = getattr(moe_module, "MoEForCausalLM")
         MoEConfig = getattr(cfg_module, "MoEConfig")
         
@@ -1073,10 +868,7 @@ class HuggingFacePredictMoE(HuggingFace):
         self.tokenizer.pad_token = self.tokenizer.unk_token
 
         model_config = MoEConfig.from_pretrained(path, trust_remote_code=True)
-        # 将统计功能配置传递给 MoE config
-        if enable_expert_stats:
-            setattr(model_config, "enable_expert_stats", True)
-        
+        # setattr(model_config, "use_soft_expert_routing", False)
         self.model = MoEForCausalLM.from_pretrained(
             path,
             from_tf=False,
@@ -1085,12 +877,6 @@ class HuggingFacePredictMoE(HuggingFace):
             low_cpu_mem_usage=True,
         ).cuda()
         self.model.eval()
-        
-        # 检测是否为 modeling_moe_infer（Predict MoE），启用统计功能
-        self.is_predict_moe = "modeling_moe_infer" in moe_module.__name__
-        if self.is_predict_moe and enable_expert_stats:
-            print("[INFO] Detected Predict MoE model, enabling expert usage statistics")
-            self._stats_output_path = expert_stats_path
 
     def generate(
         self,
@@ -1124,69 +910,3 @@ class HuggingFacePredictMoE(HuggingFace):
         )
         response = [outputs[i][len(inputs[i]) :] for i in range(len(outputs))][0]
         return response
-    
-    def get_expert_usage_stats(self):
-        """收集所有层的专家使用统计（仅在 Predict MoE 中生效）"""
-        if not getattr(self, 'is_predict_moe', False):
-            return None
-        
-        if not hasattr(self.model, 'model') or not hasattr(self.model.model, 'layers'):
-            return None
-        
-        stats = {
-            'model_type': 'predict_moe',
-            'per_layer': [],
-            'global_avg_k': 0.0,
-            'total_tokens': 0
-        }
-        
-        total_k_sum = 0
-        for idx, layer in enumerate(self.model.model.layers):
-            if hasattr(layer.mlp, 'get_expert_usage_stats'):
-                layer_stats = layer.mlp.get_expert_usage_stats()
-                if layer_stats and layer_stats['total_tokens'] > 0:
-                    stats['per_layer'].append({
-                        'layer_idx': idx,
-                        **layer_stats
-                    })
-                    total_k_sum += layer_stats['avg_k'] * layer_stats['total_tokens']
-                    stats['total_tokens'] += layer_stats['total_tokens']
-        
-        if stats['total_tokens'] > 0:
-            stats['global_avg_k'] = total_k_sum / stats['total_tokens']
-        
-        return stats
-    
-    def save_expert_usage_stats(self, output_path=None):
-        """保存专家使用统计到文件"""
-        if not getattr(self, 'is_predict_moe', False):
-            print("[WARN] Not a Predict MoE model, skipping stats saving")
-            return
-        
-        stats = self.get_expert_usage_stats()
-        if stats is None:
-            print("[WARN] No expert usage statistics collected (stats is None)")
-            return
-        
-        if stats.get('total_tokens', 0) == 0:
-            print("[WARN] No tokens processed yet, cannot save statistics")
-            return
-        
-        if output_path is None:
-            output_path = getattr(self, '_stats_output_path', './expert_usage_stats.json')
-        
-        import json
-        with open(output_path, 'w') as f:
-            json.dump(stats, f, indent=2)
-        print(f"[INFO] Expert usage stats saved to {output_path}")
-        print(f"[INFO] Global average experts per token: {stats['global_avg_k']:.2f}")
-    
-    def reset_expert_usage_stats(self):
-        """重置所有层的统计信息"""
-        if not getattr(self, 'is_predict_moe', False):
-            return
-        
-        if hasattr(self.model, 'model') and hasattr(self.model.model, 'layers'):
-            for layer in self.model.model.layers:
-                if hasattr(layer.mlp, 'reset_expert_usage_stats'):
-                    layer.mlp.reset_expert_usage_stats()

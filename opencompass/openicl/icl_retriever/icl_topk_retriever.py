@@ -199,7 +199,18 @@ class DataCollatorWithPaddingAndCuda:
             batch['labels'] = labels.input_ids
         batch.update(res_dict)
 
+        # if self.device:
+        #     batch = batch.to(self.device)
         if self.device:
-            batch = batch.to(self.device)
+            # batch = batch.to(self.device)  # 注释掉原代码
+            # 逐个字段迁移设备，避开 BatchEncoding.to 的 bug
+            for k, v in batch.items():
+                if hasattr(v, 'to'):
+                    try:
+                        batch[k] = v.to(self.device)
+                    except TypeError:
+                        import torch
+                        if torch.is_tensor(v):
+                            batch[k] = v.to(self.device)
 
         return batch
