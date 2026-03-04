@@ -258,6 +258,10 @@ class HuggingFaceQwenMoeCustom(HuggingFaceBaseModel):
                 for t in range(num_valid - 1):
                     # loss[i, t] is the NLL for predicting token at position t+1.
                     nll = float(loss_np[i, t])
+                    # Exclude masked-out / invalid positions (commonly nll==0).
+                    # This keeps downstream routing-vs-NLL analysis clean.
+                    if nll <= 0.0:
+                        continue
                     # Skip padding prediction positions.
                     if token_ids_np[i, t + 1] == pad_token_id:
                         continue
