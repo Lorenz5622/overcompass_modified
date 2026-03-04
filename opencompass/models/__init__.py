@@ -18,6 +18,7 @@ from .huggingface import HuggingFace  # noqa: F401
 from .huggingface import HuggingFaceCausalLM  # noqa: F401
 from .huggingface import HuggingFaceChatGLM3  # noqa: F401
 from .huggingface_above_v4_33 import HuggingFaceBaseModel  # noqa: F401
+from .hf_qwen_moe_custom import HuggingFaceQwenMoeCustom  # noqa: F401
 from .huggingface_above_v4_33 import HuggingFacewithChatTemplate  # noqa: F401
 from .huggingface import HuggingFaceDynamicMoE  # noqa: F401
 from .huggingface import HuggingFacePredictMoE  # noqa: F401

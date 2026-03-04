@@ -158,11 +158,13 @@ class PPLInferencer(BaseInferencer):
                     else:
                         sub_res = self.model.get_ppl_from_template(sub_prompt_list).tolist()
 
-                for res, prompt in zip(sub_res, self.model.parse_template(sub_prompt_list, mode='ppl')):
+                last_rw = getattr(self.model, '_last_routing_weights', None)
+                for batch_i, (res, prompt) in enumerate(zip(sub_res, self.model.parse_template(sub_prompt_list, mode='ppl'))):
                     sub_ppl_list.append(res)
                     ice_str = self.model.parse_template(ice[idx], mode='ppl')
                     prompt_wo_ice = prompt.replace(ice_str, '')
-                    output_handler.save_prompt_and_ppl(label, prompt_wo_ice, prompt, res, index)
+                    rw = last_rw[batch_i] if last_rw is not None else None
+                    output_handler.save_prompt_and_ppl(label, prompt_wo_ice, prompt, res, index, routing_weights=rw)
                     output_handler.results_dict[str(index)][f'label: {str(label)}']['BPB'] = res * token_num_list[index] / len(prompt_wo_ice.encode())
                     index = index + 1
             ppl.append(sub_ppl_list)

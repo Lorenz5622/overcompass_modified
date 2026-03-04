@@ -142,7 +142,7 @@ class PPLInferencerOutputHandler:
                 self.results_dict[str(idx)] = {}
             self.results_dict[str(idx)]['prediction'] = prediction
 
-    def save_prompt_and_ppl(self, label, input, prompt, ppl, idx):
+    def save_prompt_and_ppl(self, label, input, prompt, ppl, idx, routing_weights=None):
         if str(idx) not in self.results_dict.keys():
             self.results_dict[str(idx)] = {}
         if 'origin_prompt' not in self.results_dict[str(idx)]:
@@ -153,6 +153,8 @@ class PPLInferencerOutputHandler:
                                     str(label)]['testing input'] = input
         self.results_dict[str(idx)]['label: ' + str(label)]['prompt'] = prompt
         self.results_dict[str(idx)]['label: ' + str(label)]['PPL'] = ppl
+        if routing_weights is not None:
+            self.results_dict[str(idx)]['label: ' + str(label)]['probs'] = routing_weights
 
     def save_golds(self, golds):
         for idx, gold in enumerate(golds):
