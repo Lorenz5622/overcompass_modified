@@ -1,4 +1,7 @@
+import csv
+import math
 import os
+import re
 from typing import Dict, List, Optional, Union
 
 import numpy as np
@@ -792,6 +795,9 @@ class HuggingFaceChatGLM3(HuggingFace):
         return len(self.tokenizer.encode(prompt)) + self.num_extra_tokens
 
 
+_DYNAMIC_MOE_DEFAULT_TSV_PATH = 'dynamic_moe_routing_token_stats_piqa.tsv'
+
+
 class HuggingFaceDynamicMoE(HuggingFace):
 
     def __init__(
@@ -891,6 +897,217 @@ class HuggingFaceDynamicMoE(HuggingFace):
         if self.is_predict_moe and enable_expert_stats:
             print("[INFO] Detected Predict MoE model, enabling expert usage statistics")
             self._stats_output_path = expert_stats_path
+
+    def get_ppl(self, inputs: List[str], mask_length=None):
+        """Compute PPL scores while recording per-token MoE routing metrics.
+
+        Hooks into every SwitchMLP.router (a Linear submodule) whose
+        ``use_switch`` flag is True to capture routing probabilities without
+        storing the full (seq_len, batch, num_experts) tensor.  Only 3 scalar
+        summary stats per token per layer are kept.
+
+        The TSV path defaults to _DYNAMIC_MOE_DEFAULT_TSV_PATH and can be
+        overridden by setting ``self._routing_tsv_path`` before calling.
+        """
+        assert self.tokenizer.pad_token, 'pad_token must be set'
+        pad_token_id = self.tokenizer.pad_token_id
+
+        tokens = self.tokenizer.batch_encode_plus(
+            inputs,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            add_special_tokens=True,
+            max_length=self.max_seq_len,
+        )
+        tokens = {k: v.to(self.model.device) for k, v in tokens.items()}
+
+        # ------------------------------------------------------------------
+        # Register forward hooks on SwitchMLP.router (Linear submodule).
+        # hidden_states fed to router: (seq_len, batch, hidden)
+        # router output (our hook's `out`): (seq_len, batch, num_experts) raw logits
+        # We apply softmax at dim=2, permute to (batch, seq_len, num_experts),
+        # flatten to (batch*seq_len, num_experts) for consistent stat_idx.
+        # ------------------------------------------------------------------
+        routing_stats = {}   # lkey -> list[(top4, delta45, entropy)]
+        layer_indices = {}   # lkey -> int
+        hooks = []
+
+        for _name, module in self.model.named_modules():
+            if (type(module).__name__ == 'SwitchMLP'
+                    and getattr(module, 'use_switch', False)):
+                layer_idx = module.layer_num
+                layer_key = f'layer{layer_idx}'
+                layer_indices[layer_key] = layer_idx
+
+                def make_hook(lkey):
+                    def hook_fn(mod, inp, out):
+                        # out: (seq_len, batch, num_experts) raw logits
+                        rw = torch.nn.functional.softmax(out.float(), dim=2)
+                        rw = rw.permute(1, 0, 2)  # (batch, seq_len, num_experts)
+                        rw_np = rw.reshape(-1, rw.size(2)).cpu().detach().numpy()
+                        stats = []
+                        for token_probs in rw_np:
+                            sp = sorted(token_probs, reverse=True)
+                            s_top4 = float(sp[0] + sp[1] + sp[2] + sp[3]) \
+                                if len(sp) >= 4 else float(sum(sp))
+                            delta = float(sp[3] - sp[4]) if len(sp) >= 5 else 0.0
+                            ent = 0.0
+                            for p in token_probs:
+                                p = float(p)
+                                if p > 1e-12:
+                                    ent -= p * math.log(p)
+                            stats.append((s_top4, delta, ent))
+                        routing_stats[lkey] = stats
+                    return hook_fn
+
+                hooks.append(
+                    module.router.register_forward_hook(make_hook(layer_key)))
+
+        # ------------------------------------------------------------------
+        # Forward pass - hooks fire here.
+        # ------------------------------------------------------------------
+        try:
+            with torch.no_grad():
+                outputs = self.model(
+                    input_ids=tokens['input_ids'],
+                    attention_mask=tokens.get('attention_mask'),
+                    return_dict=False,
+                )
+                logits = outputs[0]  # (batch, seq_len, vocab_size)
+        finally:
+            for h in hooks:
+                h.remove()
+
+        # ------------------------------------------------------------------
+        # Compute per-token cross-entropy losses.
+        # ------------------------------------------------------------------
+        batch_size, seq_len, vocab_size = logits.shape
+        shift_logits = logits[:, :-1, :].contiguous().float()
+        shift_labels = tokens['input_ids'][:, 1:].contiguous()
+        loss = torch.nn.functional.cross_entropy(
+            shift_logits.view(-1, vocab_size),
+            shift_labels.view(-1),
+            ignore_index=pad_token_id,
+            reduction='none',
+        ).view(batch_size, seq_len - 1)   # (batch, seq_len-1)
+        lens = (tokens['input_ids'] != pad_token_id).sum(-1).cpu().numpy()
+
+        if mask_length is not None:
+            mask = torch.zeros_like(shift_labels)
+            for i in range(len(mask)):
+                for j in range(mask_length[i] - 1, len(mask[i])):
+                    mask[i][j] = 1
+            loss = loss * mask
+            lens -= np.array(mask_length)
+
+        ce_loss = loss.float().sum(-1).cpu().detach().numpy() / lens
+
+        # ------------------------------------------------------------------
+        # Write per-token routing stats to TSV.
+        # ------------------------------------------------------------------
+        self._write_token_stats_tsv(
+            inputs=inputs,
+            token_ids_np=tokens['input_ids'].cpu().numpy(),
+            loss_np=loss.float().cpu().detach().numpy(),
+            routing_stats=routing_stats,
+            layer_indices=layer_indices,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            pad_token_id=pad_token_id,
+        )
+
+        return ce_loss
+
+    def _write_token_stats_tsv(
+        self,
+        inputs,
+        token_ids_np,
+        loss_np,
+        routing_stats,
+        layer_indices,
+        batch_size,
+        seq_len,
+        pad_token_id,
+    ):
+        """Append per-token routing stats rows to the TSV file."""
+        sorted_layers = sorted(layer_indices.items(), key=lambda x: x[1])
+        all_lkeys = [lk for lk, _ in sorted_layers]
+        last_2_lkeys = (
+            {lk for lk, _ in sorted_layers[-2:]}
+            if len(sorted_layers) >= 2
+            else set(all_lkeys)
+        )
+
+        tsv_path = getattr(self, '_routing_tsv_path', _DYNAMIC_MOE_DEFAULT_TSV_PATH)
+        write_header = not os.path.exists(tsv_path)
+
+        with open(tsv_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f, delimiter='\t')
+            if write_header:
+                per_layer_header = []
+                for lkey in all_lkeys:
+                    per_layer_header += [
+                        f'top4_{lkey}', f'delta_{lkey}', f'entropy_{lkey}',
+                    ]
+                writer.writerow([
+                    'input_text', 'token_idx', 'token_nll',
+                    'top4_all', 'delta_all', 'entropy_all',
+                    'top4_last2', 'delta_last2', 'entropy_last2',
+                ] + per_layer_header)
+
+            for i in range(batch_size):
+                num_valid = int((token_ids_np[i] != pad_token_id).sum())
+                label = inputs[i][:60].replace('\t', ' ').replace('\n', ' ')
+
+                for t in range(num_valid - 1):
+                    nll = float(loss_np[i, t])
+                    if token_ids_np[i, t + 1] == pad_token_id:
+                        continue
+
+                    stat_idx = i * seq_len + t
+
+                    top4_all_v, delta_all_v, ent_all_v = [], [], []
+                    top4_l2_v, delta_l2_v, ent_l2_v = [], [], []
+                    per_layer_vals = []
+
+                    for lkey in all_lkeys:
+                        if lkey not in routing_stats:
+                            per_layer_vals += ['', '', '']
+                            continue
+                        stats = routing_stats[lkey]
+                        if stat_idx >= len(stats):
+                            per_layer_vals += ['', '', '']
+                            continue
+                        s_top4, delta, ent = stats[stat_idx]
+                        top4_all_v.append(s_top4)
+                        delta_all_v.append(delta)
+                        ent_all_v.append(ent)
+                        if lkey in last_2_lkeys:
+                            top4_l2_v.append(s_top4)
+                            delta_l2_v.append(delta)
+                            ent_l2_v.append(ent)
+                        per_layer_vals += [
+                            f'{s_top4:.6f}', f'{delta:.6f}', f'{ent:.6f}',
+                        ]
+
+                    if not top4_all_v:
+                        continue
+
+                    def _mean(lst):
+                        return sum(lst) / len(lst)
+
+                    writer.writerow([
+                        label,
+                        t,
+                        f'{nll:.6f}',
+                        f'{_mean(top4_all_v):.6f}',
+                        f'{_mean(delta_all_v):.6f}',
+                        f'{_mean(ent_all_v):.6f}',
+                        f'{_mean(top4_l2_v):.6f}' if top4_l2_v else '',
+                        f'{_mean(delta_l2_v):.6f}' if delta_l2_v else '',
+                        f'{_mean(ent_l2_v):.6f}' if ent_l2_v else '',
+                    ] + per_layer_vals)
 
     def generate(
         self,
