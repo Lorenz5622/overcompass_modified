@@ -5,16 +5,19 @@ models = [
     dict(
         type=HuggingFaceDynamicMoE,
         # type=HuggingFaceCausalLM,
-        path='/data/cyx/models/Dynamic_MoE',
-        tokenizer_path='/data/cyx/models/Dynamic_MoE',
-        max_out_len=512,
+        path='/data/cyx/models/out_piqa_lowrank',
+        tokenizer_path='/data/cyx/models/out_piqa_lowrank',
+        moe_package_name='Qwen_MoE',
+        moe_modeling_module='modeling_moe_dm',
+        moe_config_module='configuration_moe_dm',
+        max_out_len=192,
         model_kwargs=dict(
             trust_remote_code=True,
             device_map='auto',
             torch_dtype=torch.float16,
             enable_expert_stats=False,
         ),
-        batch_size=2,
+        batch_size=4,
         run_cfg=dict(num_gpus=1, num_procs=8),
     )
 ]

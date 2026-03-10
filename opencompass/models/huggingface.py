@@ -817,11 +817,17 @@ class HuggingFaceDynamicMoE(HuggingFace):
         pad_token_id: Optional[int] = None,
         mode: str = "none",
         num_extra_tokens: int = 50,
+        moe_package_name: str = "Predict_MoE",
+        moe_modeling_module: str = "modeling_moe_ori",
+        moe_config_module: str = "configuration_moe",
     ):
         # ⚠️ 关键：在调用父类 __init__ 之前提取并移除自定义参数
         # 避免这些参数被传递到 HuggingFace 的模型加载函数
         enable_expert_stats = model_kwargs.pop('enable_expert_stats', False)
         expert_stats_path = model_kwargs.pop('expert_stats_path', './expert_usage_stats.json')
+        self.moe_package_name = moe_package_name
+        self.moe_modeling_module = moe_modeling_module
+        self.moe_config_module = moe_config_module
         
         super().__init__(
             path=path,
@@ -848,30 +854,53 @@ class HuggingFaceDynamicMoE(HuggingFace):
         # 将模型目录和其子目录加入 sys.path，避免动态 MoE 包因路径差异导入失败
         moe_root = os.path.abspath(path)
         print(f"----------path: {path} -------------------")
-        moe_inner = os.path.join(moe_root, "Predict_MoE")
+        moe_inner = os.path.join(moe_root, self.moe_package_name)
         for candidate in (moe_root, moe_inner):
             if os.path.isdir(candidate) and candidate not in sys.path:
                 sys.path.append(candidate)
 
         import importlib
-        # 兼容两种包结构的导入路径
+        modeling_candidates = [
+            f"{self.moe_package_name}.modeling.{self.moe_modeling_module}",
+        ]
+        config_candidates = [
+            f"{self.moe_package_name}.modeling.{self.moe_config_module}",
+        ]
+
+        # 兼容模型目录中同时包含包目录和直接 modeling/ 目录两种结构
+        if os.path.isdir(os.path.join(moe_root, "modeling")):
+            modeling_candidates.append(f"modeling.{self.moe_modeling_module}")
+            config_candidates.append(f"modeling.{self.moe_config_module}")
+
+        moe_module = None
+        cfg_module = None
+        import_errors = []
         try:
-            # e.g. {path}/Dynamic_MoE/modeling/...
-            moe_module = importlib.import_module(
-                "Predict_MoE.modeling.modeling_moe_ori"
-            )
-            cfg_module = importlib.import_module(
-                "Predict_MoE.modeling.configuration_moe"
-            )
+            for modeling_name in modeling_candidates:
+                try:
+                    moe_module = importlib.import_module(modeling_name)
+                    break
+                except ImportError as e:
+                    import_errors.append((modeling_name, str(e)))
+            for config_name in config_candidates:
+                try:
+                    cfg_module = importlib.import_module(config_name)
+                    break
+                except ImportError as e:
+                    import_errors.append((config_name, str(e)))
+            if moe_module is None or cfg_module is None:
+                raise ImportError("failed to import requested Dynamic MoE modules")
         except ImportError as e:
-            # 这里直接报错，方便调试，而不是再去导入一个不存在的路径
             raise ImportError(
                 "Cannot import Dynamic_MoE modules. "
-                "Please make sure Dynamic_MoE is installed in the current environment "
-                "and can be imported as 'import Dynamic_MoE'. "
+                f"Tried modeling={modeling_candidates}, config={config_candidates}. "
+                f"Collected import errors: {import_errors}. "
                 f"Original error: {e}"
             )
-        print(f"modeling moe is : modeling moe ori, path = {path}")
+        print(
+            "modeling moe module: "
+            f"{moe_module.__name__}, config module: {cfg_module.__name__}, path = {path}"
+        )
         MoEForCausalLM = getattr(moe_module, "MoEForCausalLM")
         MoEConfig = getattr(cfg_module, "MoEConfig")
         
