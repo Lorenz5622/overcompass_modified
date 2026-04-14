@@ -1,9 +1,9 @@
 # flake8: noqa
 import csv
+import importlib
 import math
 import os
 import re
-import sys
 from typing import List, Optional
 
 import numpy as np
@@ -19,8 +19,6 @@ from .huggingface_above_v4_33 import (
     _set_model_kwargs_torch_dtype,
 )
 
-QWEN_MOE_MODELING_PATH = '/home/cyx/qwen_moe'
-
 # Default path for the per-token routing statistics TSV file.
 _DEFAULT_TSV_PATH = 'moe_routing_token_stats_piqa.tsv'
 
@@ -35,12 +33,81 @@ class HuggingFaceQwenMoeCustom(HuggingFaceBaseModel):
     by setting ``self._routing_tsv_path`` before calling ``get_ppl``.
     """
 
-    def _load_model(self, path: str, kwargs: dict, peft_path: Optional[str] = None, peft_kwargs: dict = dict()):
-        if QWEN_MOE_MODELING_PATH not in sys.path:
-            sys.path.insert(0, QWEN_MOE_MODELING_PATH)
+    def __init__(
+        self,
+        path: str,
+        hf_cache_dir: Optional[str] = None,
+        max_seq_len: int = 2048,
+        tokenizer_path: Optional[str] = None,
+        tokenizer_kwargs: dict = dict(),
+        peft_path: Optional[str] = None,
+        tokenizer_only: bool = False,
+        model_kwargs: dict = dict(device_map='auto'),
+        generation_kwargs: dict = dict(),
+        meta_template: Optional[dict] = None,
+        extract_pred_after_decode: bool = False,
+        batch_padding: bool = False,
+        pad_token_id: Optional[int] = None,
+        mode: str = 'none',
+        num_extra_tokens: int = 0,
+        moe_modeling_module: str = 'Qwen_MoE.modeling.modeling_moe',
+        moe_config_module: str = 'Qwen_MoE.configuration.configuration_moe',
+    ):
+        self.moe_modeling_module = moe_modeling_module
+        self.moe_config_module = moe_config_module
+        self._moe_modeling_module = None
+        self._moe_config_module = None
 
-        from Qwen_MoE.modeling.configuration_moe import Qwen2MoeConfig
-        from Qwen_MoE.modeling.modeling_moe import Qwen2MoeForCausalLM
+        super().__init__(
+            path=path,
+            hf_cache_dir=hf_cache_dir,
+            max_seq_len=max_seq_len,
+            tokenizer_path=tokenizer_path,
+            tokenizer_kwargs=tokenizer_kwargs,
+            peft_path=peft_path,
+            tokenizer_only=tokenizer_only,
+            generation_kwargs=generation_kwargs,
+            model_kwargs=model_kwargs,
+            meta_template=meta_template,
+            extract_pred_after_decode=extract_pred_after_decode,
+            batch_padding=batch_padding,
+            pad_token_id=pad_token_id,
+            mode=mode,
+            num_extra_tokens=num_extra_tokens,
+        )
+
+    def _try_import_first(self, candidates):
+        import_errors = []
+        for name in candidates:
+            try:
+                return importlib.import_module(name), import_errors
+            except ImportError as e:
+                import_errors.append((name, str(e)))
+        return None, import_errors
+
+    def _import_moe_modules(self):
+        if self._moe_modeling_module is not None and self._moe_config_module is not None:
+            return self._moe_modeling_module, self._moe_config_module
+
+        modeling_candidates = [self.moe_modeling_module]
+        config_candidates = [self.moe_config_module]
+
+        modeling_module, modeling_errors = self._try_import_first(modeling_candidates)
+        config_module, config_errors = self._try_import_first(config_candidates)
+        if modeling_module is None or config_module is None:
+            raise ImportError(
+                'Cannot import MoE modules. '
+                f'Tried modeling={modeling_candidates}, config={config_candidates}. '
+                f'Collected import errors: {modeling_errors + config_errors}'
+            )
+        self._moe_modeling_module = modeling_module
+        self._moe_config_module = config_module
+        return self._moe_modeling_module, self._moe_config_module
+
+    def _load_model(self, path: str, kwargs: dict, peft_path: Optional[str] = None, peft_kwargs: dict = dict()):
+        moe_module, cfg_module = self._import_moe_modules()
+        Qwen2MoeConfig = getattr(cfg_module, 'Qwen2MoeConfig')
+        Qwen2MoeForCausalLM = getattr(moe_module, 'Qwen2MoeForCausalLM')
 
         DEFAULT_MODEL_KWARGS = dict(device_map='auto')
         model_kwargs = DEFAULT_MODEL_KWARGS
@@ -82,9 +149,8 @@ class HuggingFaceQwenMoeCustom(HuggingFaceBaseModel):
 
         Returns the same averaged ce_loss array as the parent implementation.
         """
-        if QWEN_MOE_MODELING_PATH not in sys.path:
-            sys.path.insert(0, QWEN_MOE_MODELING_PATH)
-        from Qwen_MoE.modeling.modeling_moe import Qwen2MoeSparseMoeBlock
+        moe_module, _ = self._import_moe_modules()
+        Qwen2MoeSparseMoeBlock = getattr(moe_module, 'Qwen2MoeSparseMoeBlock')
 
         assert self.tokenizer.pad_token, 'pad_token must be set'
         pad_token_id = self.tokenizer.pad_token_id

@@ -1,15 +1,17 @@
-# # configs/models/dynamic_moe.py
-from opencompass.models import DynamicMoE,HuggingFaceDynamicMoE, HuggingFaceCausalLM
+# configs/models/dynamic_moe/dynamic_moe.py
+# 原版 Predict_MoE 执行代码配置
+from opencompass.models import HuggingFaceDynamicMoE
 import torch
+
 models = [
     dict(
         type=HuggingFaceDynamicMoE,
-        # type=HuggingFaceCausalLM,
-        path='/data/cyx/models/out_piqa_lowrank',
-        tokenizer_path='/data/cyx/models/out_piqa_lowrank',
-        moe_package_name='Qwen_MoE',
-        moe_modeling_module='modeling_moe_dm',
-        moe_config_module='configuration_moe_dm',
+        abbr='dynamic_moe_predict',
+        path='/data/cyx/models/out_piqa_lora_ori',
+        tokenizer_path='/data/cyx/models/out_piqa_lora_ori',
+        moe_package_name='Predict_MoE',
+        moe_modeling_module='modeling_moe_ori',
+        moe_config_module='configuration_moe',
         max_out_len=192,
         model_kwargs=dict(
             trust_remote_code=True,
@@ -17,35 +19,7 @@ models = [
             torch_dtype=torch.float16,
             enable_expert_stats=False,
         ),
-        batch_size=4,
+        batch_size=8,
         run_cfg=dict(num_gpus=1, num_procs=8),
     )
 ]
-
-
-# configs/models/dynamic_moe_env.py
-# import os
-# from opencompass.models import HuggingFaceDynamicMoE
-# import torch
-
-# model_path = os.environ["OC_MODEL_PATH"]
-# model_name = os.environ.get("OC_MODEL_NAME", "dynamic_moe_env")
-
-# models = [
-#     dict(
-#         type=HuggingFaceDynamicMoE,
-#         abbr=model_name,
-#         path=model_path,
-#         tokenizer_path=model_path,
-#         max_out_len=192,
-#         model_kwargs=dict(
-#             trust_remote_code=True,
-#             device_map="auto",
-#             torch_dtype=torch.float16,
-#             enable_expert_stats=False,  # 启用专家统计（仅在 Predict MoE 中生效）
-#             expert_stats_path='./expert_usage_stats.json',  # 统计结果保存路径
-#         ),
-#         batch_size=192,
-#         run_cfg=dict(num_gpus=1, num_procs=16),
-#     )
-# ]

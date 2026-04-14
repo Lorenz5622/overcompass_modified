@@ -2,5 +2,5 @@ export CUDA_VISIBLE_DEVICES=0
 
 python run.py \
     --datasets piqa_ppl \
-    --models dynamic_moe \
+    --models dynamic_moe_dm \
     --debug

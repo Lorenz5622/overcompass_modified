@@ -2,6 +2,7 @@ import csv
 import math
 import os
 import re
+from collections import Counter
 from typing import Dict, List, Optional, Union
 
 import numpy as np
@@ -824,10 +825,26 @@ class HuggingFaceDynamicMoE(HuggingFace):
         # ⚠️ 关键：在调用父类 __init__ 之前提取并移除自定义参数
         # 避免这些参数被传递到 HuggingFace 的模型加载函数
         enable_expert_stats = model_kwargs.pop('enable_expert_stats', False)
+        enable_routing_eval = bool(model_kwargs.pop('enable_routing_eval', False))
+        routing_eval_with_layers = bool(
+            model_kwargs.pop('routing_eval_with_layers', True))
+        routing_eval_prob_eps = float(
+            model_kwargs.pop('routing_eval_prob_eps', 1e-8))
+        routing_eval_top_p = float(model_kwargs.pop('routing_eval_top_p', 0.9))
+        routing_eval_store_token_counts = bool(
+            model_kwargs.pop('routing_eval_store_token_counts', True))
         expert_stats_path = model_kwargs.pop('expert_stats_path', './expert_usage_stats.json')
         self.moe_package_name = moe_package_name
         self.moe_modeling_module = moe_modeling_module
         self.moe_config_module = moe_config_module
+        self._enable_routing_eval = enable_routing_eval
+        self._routing_eval_with_layers = routing_eval_with_layers
+        self._routing_eval_prob_eps = max(routing_eval_prob_eps, 1e-12)
+        self._routing_eval_top_p = min(max(routing_eval_top_p, 1e-6), 1.0)
+        self._routing_eval_store_token_counts = routing_eval_store_token_counts
+        self._last_routing_eval = None
+        self._last_routing_weights = None
+        self._modeling_entmax_bisect = None
         
         super().__init__(
             path=path,
@@ -901,6 +918,8 @@ class HuggingFaceDynamicMoE(HuggingFace):
             "modeling moe module: "
             f"{moe_module.__name__}, config module: {cfg_module.__name__}, path = {path}"
         )
+        self._modeling_entmax_bisect = getattr(moe_module, 'entmax_bisect', None)
+        
         MoEForCausalLM = getattr(moe_module, "MoEForCausalLM")
         MoEConfig = getattr(cfg_module, "MoEConfig")
         
@@ -911,7 +930,7 @@ class HuggingFaceDynamicMoE(HuggingFace):
         # 将统计功能配置传递给 MoE config
         if enable_expert_stats:
             setattr(model_config, "enable_expert_stats", True)
-        
+        print(f"use shared expert embedding: {getattr(model_config, 'share_router_expert_embedding', False)}")
         self.model = MoEForCausalLM.from_pretrained(
             path,
             from_tf=False,
@@ -926,6 +945,121 @@ class HuggingFaceDynamicMoE(HuggingFace):
         if self.is_predict_moe and enable_expert_stats:
             print("[INFO] Detected Predict MoE model, enabling expert usage statistics")
             self._stats_output_path = expert_stats_path
+
+
+    @staticmethod
+    def _entmax_bisect(inputs: torch.Tensor,
+                       alpha: float = 1.5,
+                       dim: int = -1,
+                       n_iter: int = 32,
+                       eps: float = 1e-12) -> torch.Tensor:
+        """Fallback alpha-entmax used when modeling module doesn't expose one."""
+        if not (1.0 < alpha <= 2.0):
+            raise ValueError(f'alpha must be in (1, 2], got {alpha}')
+        alpha_m1 = alpha - 1.0
+        inv_alpha_m1 = 1.0 / alpha_m1
+
+        x = inputs - inputs.max(dim=dim, keepdim=True).values
+        tau_lo = x.min(dim=dim, keepdim=True).values - 1.0
+        tau_hi = x.max(dim=dim, keepdim=True).values
+
+        for _ in range(n_iter):
+            tau_mid = (tau_lo + tau_hi) * 0.5
+            p_mid = torch.clamp(alpha_m1 * (x - tau_mid), min=0.0) ** inv_alpha_m1
+            sum_p = p_mid.sum(dim=dim, keepdim=True)
+            tau_lo = torch.where(sum_p > 1.0, tau_mid, tau_lo)
+            tau_hi = torch.where(sum_p <= 1.0, tau_mid, tau_hi)
+
+        tau_star = (tau_lo + tau_hi) * 0.5
+        probs = torch.clamp(alpha_m1 * (x - tau_star), min=0.0) ** inv_alpha_m1
+        probs = probs / probs.sum(dim=dim, keepdim=True).clamp_min(eps)
+        return probs
+
+    @staticmethod
+    def _mean_or_none(values):
+        vals = [float(v) for v in values if v is not None]
+        if not vals:
+            return None
+        return sum(vals) / len(vals)
+
+    @staticmethod
+    def _top_p_expert_count(probs: torch.Tensor, top_p: float) -> torch.Tensor:
+        """Return minimal nucleus size per token for probs[..., experts]."""
+        if probs.size(-1) == 0:
+            raise ValueError('expected at least one expert')
+        sorted_probs, _ = torch.sort(probs, dim=-1, descending=True)
+        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+        keep_count = (cumulative_probs < top_p).sum(dim=-1) + 1
+        return keep_count.clamp(max=probs.size(-1)).to(torch.int64)
+
+    @staticmethod
+    def _to_batch_seq_expert(out_tensor: torch.Tensor,
+                             batch_size: int,
+                             seq_len: int):
+        """Normalize router output shape to (batch, seq, experts)."""
+        if isinstance(out_tensor, (tuple, list)):
+            out_tensor = out_tensor[0]
+        if not torch.is_tensor(out_tensor):
+            return None
+        if out_tensor.dim() == 3:
+            if out_tensor.size(0) == batch_size and out_tensor.size(1) == seq_len:
+                return out_tensor
+            if out_tensor.size(0) == seq_len and out_tensor.size(1) == batch_size:
+                return out_tensor.permute(1, 0, 2).contiguous()
+        if out_tensor.dim() == 2 and out_tensor.size(0) == batch_size * seq_len:
+            return out_tensor.view(batch_size, seq_len, out_tensor.size(-1))
+        return None
+
+    def _summarize_layer_route_probs(self, route_probs_bse: torch.Tensor,
+                                     valid_token_mask: torch.Tensor):
+        """Summarize one layer route_probs into per-sample scalar stats."""
+        seq_for_loss = min(route_probs_bse.size(1), valid_token_mask.size(1))
+        probs = route_probs_bse[:, :seq_for_loss, :]
+        mask = valid_token_mask[:, :seq_for_loss]
+
+        sorted_probs, _ = torch.sort(probs, dim=-1, descending=True)
+        top1 = sorted_probs[..., 0]
+        top2 = sorted_probs[..., 1] if sorted_probs.size(-1) > 1 else torch.zeros_like(top1)
+        top4 = sorted_probs[..., :min(4, sorted_probs.size(-1))].sum(dim=-1)
+        margin = top1 - top2
+        p_safe = probs.clamp_min(self._routing_eval_prob_eps)
+        entropy = -(p_safe * p_safe.log()).sum(dim=-1)
+        nonzero = (probs > self._routing_eval_prob_eps).sum(dim=-1).float()
+        top1_idx = probs.argmax(dim=-1)
+        top_p_count = self._top_p_expert_count(probs, self._routing_eval_top_p)
+
+        sample_stats = []
+        for i in range(probs.size(0)):
+            m = mask[i]
+            token_count = int(m.sum().item())
+            if token_count == 0:
+                sample_stats.append({'token_count': 0})
+                continue
+            token_top_p_count = top_p_count[i][m]
+            token_top_p_count_list = [int(v) for v in token_top_p_count.tolist()]
+            top_p_hist = {
+                str(k): int(v)
+                for k, v in sorted(Counter(token_top_p_count_list).items())
+            }
+            sample_entry = {
+                'routing_top_p': self._routing_eval_top_p,
+                'token_count': token_count,
+                'nz_expert_mean': float(nonzero[i][m].mean().item()),
+                'entropy_mean': float(entropy[i][m].mean().item()),
+                'top1_prob_mean': float(top1[i][m].mean().item()),
+                'top1_top2_margin_mean': float(margin[i][m].mean().item()),
+                'top4_mass_mean': float(top4[i][m].mean().item()),
+                'top1_expert_unique': int(top1_idx[i][m].unique().numel()),
+                'top_p_expert_count_mean': float(
+                    token_top_p_count.float().mean().item()),
+                'top_p_expert_count_min': int(token_top_p_count.min().item()),
+                'top_p_expert_count_max': int(token_top_p_count.max().item()),
+                'top_p_expert_count_hist': top_p_hist,
+            }
+            if self._routing_eval_store_token_counts:
+                sample_entry['top_p_expert_count_tokens'] = token_top_p_count_list
+            sample_stats.append(sample_entry)
+        return sample_stats
 
     def get_ppl(self, inputs: List[str], mask_length=None):
         """Compute PPL scores while recording per-token MoE routing metrics.
@@ -950,16 +1084,26 @@ class HuggingFaceDynamicMoE(HuggingFace):
             max_length=self.max_seq_len,
         )
         tokens = {k: v.to(self.model.device) for k, v in tokens.items()}
+        self._last_routing_eval = None
+        self._last_routing_weights = None
+
+        batch_size_tok, seq_len_tok = tokens['input_ids'].shape
+        valid_token_mask = (tokens['input_ids'][:, 1:] != pad_token_id)
+        if mask_length is not None:
+            for i, mlen in enumerate(mask_length):
+                cutoff = max(int(mlen) - 1, 0)
+                if cutoff > 0:
+                    valid_token_mask[i, :cutoff] = False
 
         # ------------------------------------------------------------------
         # Register forward hooks on SwitchMLP.router (Linear submodule).
-        # hidden_states fed to router: (seq_len, batch, hidden)
-        # router output (our hook's `out`): (seq_len, batch, num_experts) raw logits
-        # We apply softmax at dim=2, permute to (batch, seq_len, num_experts),
-        # flatten to (batch*seq_len, num_experts) for consistent stat_idx.
+        # We reconstruct route_probs with the same routing activation
+        # as layer forward (softmax or entmax), then summarize per token.
         # ------------------------------------------------------------------
         routing_stats = {}   # lkey -> list[(top4, delta45, entropy)]
         layer_indices = {}   # lkey -> int
+        routing_eval_by_layer = {}   # lkey -> list[dict], per-sample stats
+        layer_route_meta = {}   # lkey -> dict(routing_activation, routing_alpha)
         hooks = []
 
         for _name, module in self.model.named_modules():
@@ -967,19 +1111,52 @@ class HuggingFaceDynamicMoE(HuggingFace):
                     and getattr(module, 'use_switch', False)):
                 layer_idx = module.layer_num
                 layer_key = f'layer{layer_idx}'
+                use_entmax = bool(getattr(module, 'router_use_entmax', False))
+                entmax_alpha = float(getattr(module, 'router_entmax_alpha', 1.5))
                 layer_indices[layer_key] = layer_idx
+                layer_route_meta[layer_key] = {
+                    'routing_activation': 'entmax' if use_entmax else 'softmax',
+                    'routing_alpha': entmax_alpha if use_entmax else None,
+                }
 
-                def make_hook(lkey):
+                def make_hook(lkey, switch_module):
+                    use_entmax_local = bool(
+                        getattr(switch_module, 'router_use_entmax', False))
+                    entmax_alpha_local = float(
+                        getattr(switch_module, 'router_entmax_alpha', 1.5))
+                    
+                    # print(f"Registering hook for {lkey}, use_entmax={use_entmax_local}, entmax_alpha={entmax_alpha_local}")
+                    # print(f"share_router_expert_embedding: {getattr(switch_module, 'share_router_expert_embedding', False)}")
                     def hook_fn(mod, inp, out):
-                        # out: (seq_len, batch, num_experts) raw logits
-                        rw = torch.nn.functional.softmax(out.float(), dim=2)
-                        rw = rw.permute(1, 0, 2)  # (batch, seq_len, num_experts)
-                        rw_np = rw.reshape(-1, rw.size(2)).cpu().detach().numpy()
+                        router_logits = self._to_batch_seq_expert(
+                            out, batch_size=batch_size_tok, seq_len=seq_len_tok)
+                        if router_logits is None:
+                            return
+
+                        if use_entmax_local:
+                            entmax_fn = self._modeling_entmax_bisect
+                            if callable(entmax_fn):
+                                rw = entmax_fn(
+                                    router_logits.float(),
+                                    alpha=entmax_alpha_local,
+                                    dim=-1,
+                                )
+                            else:
+                                rw = self._entmax_bisect(
+                                    router_logits.float(),
+                                    alpha=entmax_alpha_local,
+                                    dim=-1,
+                                )
+                        else:
+                            rw = torch.nn.functional.softmax(
+                                router_logits.float(), dim=-1)
+
+                        rw_np = rw.reshape(-1, rw.size(-1)).cpu().detach().numpy()
                         stats = []
                         for token_probs in rw_np:
                             sp = sorted(token_probs, reverse=True)
-                            s_top4 = float(sp[0] + sp[1] + sp[2] + sp[3]) \
-                                if len(sp) >= 4 else float(sum(sp))
+                            s_top4 = (float(sp[0] + sp[1] + sp[2] + sp[3])
+                                     if len(sp) >= 4 else float(sum(sp)))
                             delta = float(sp[3] - sp[4]) if len(sp) >= 5 else 0.0
                             ent = 0.0
                             for p in token_probs:
@@ -988,10 +1165,14 @@ class HuggingFaceDynamicMoE(HuggingFace):
                                     ent -= p * math.log(p)
                             stats.append((s_top4, delta, ent))
                         routing_stats[lkey] = stats
+                        if self._enable_routing_eval:
+                            routing_eval_by_layer[lkey] = self._summarize_layer_route_probs(
+                                rw, valid_token_mask)
                     return hook_fn
 
                 hooks.append(
-                    module.router.register_forward_hook(make_hook(layer_key)))
+                    module.router.register_forward_hook(
+                        make_hook(layer_key, module)))
 
         # ------------------------------------------------------------------
         # Forward pass - hooks fire here.
@@ -1045,6 +1226,60 @@ class HuggingFaceDynamicMoE(HuggingFace):
             seq_len=seq_len,
             pad_token_id=pad_token_id,
         )
+
+        if self._enable_routing_eval:
+            sorted_layers = sorted(layer_indices.items(), key=lambda x: x[1])
+            ordered_lkeys = [lk for lk, _ in sorted_layers]
+            sample_eval_list = []
+            for sample_idx in range(batch_size):
+                by_layer = {}
+                for lkey in ordered_lkeys:
+                    sample_layer_stats = routing_eval_by_layer.get(lkey)
+                    if not sample_layer_stats or sample_idx >= len(sample_layer_stats):
+                        continue
+                    entry = dict(sample_layer_stats[sample_idx])
+                    entry.update(layer_route_meta.get(lkey, {}))
+                    by_layer[lkey] = entry
+
+                global_entry = {
+                    'layer_count': len(by_layer),
+                    'routing_top_p': self._routing_eval_top_p,
+                    'token_count_mean': self._mean_or_none(
+                        [v.get('token_count') for v in by_layer.values()]),
+                    'nz_expert_mean': self._mean_or_none(
+                        [v.get('nz_expert_mean') for v in by_layer.values()]),
+                    'entropy_mean': self._mean_or_none(
+                        [v.get('entropy_mean') for v in by_layer.values()]),
+                    'top1_prob_mean': self._mean_or_none(
+                        [v.get('top1_prob_mean') for v in by_layer.values()]),
+                    'top1_top2_margin_mean': self._mean_or_none(
+                        [v.get('top1_top2_margin_mean') for v in by_layer.values()]),
+                    'top4_mass_mean': self._mean_or_none(
+                        [v.get('top4_mass_mean') for v in by_layer.values()]),
+                    'top1_expert_unique_mean': self._mean_or_none(
+                        [v.get('top1_expert_unique') for v in by_layer.values()]),
+                    'top_p_expert_count_mean': self._mean_or_none(
+                        [v.get('top_p_expert_count_mean') for v in by_layer.values()]),
+                }
+                entmax_alphas = sorted({
+                    float(v['routing_alpha']) for v in by_layer.values()
+                    if v.get('routing_activation') == 'entmax'
+                    and v.get('routing_alpha') is not None
+                })
+                global_entry['routing_activation'] = (
+                    'entmax' if entmax_alphas else 'softmax')
+                if entmax_alphas:
+                    global_entry['routing_alpha'] = (
+                        entmax_alphas[0]
+                        if len(entmax_alphas) == 1 else entmax_alphas)
+                sample_eval = {'global': global_entry}
+                if self._routing_eval_with_layers:
+                    sample_eval['by_layer'] = by_layer
+                sample_eval_list.append(sample_eval)
+            self._last_routing_eval = sample_eval_list
+            self._last_routing_weights = [
+                {'routing_eval': entry} for entry in sample_eval_list
+            ]
 
         return ce_loss
 
