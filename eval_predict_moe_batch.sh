@@ -23,10 +23,10 @@ declare -a MODEL_DATASET_PAIRS=(
   # "/data/cyx/models/Predict_MoE_k21/|dynamic_moe|piqa_ppl"
   # "/data/cyx/models/Predict_MoE_k23/|dynamic_moe|piqa_ppl"
   # "/data/cyx/models/Predict_MoE_k25/|dynamic_moe|piqa_ppl"
-  "/data/cyx/models/Predict_MoE_hellaswag/|predict_moe|hellaswag_ppl"
-  "/data/cyx/models/out_hellaswag_lora/|dynamic_moe|hellaswag_ppl"
-  "/data/cyx/models/out_hellaswag_lora_k1/|dynamic_moe|hellaswag_ppl"
-  "/data/cyx/models/out_hellaswag_lora_k2/|dynamic_moe|hellaswag_ppl"
+  "/data/cyx/models/Predict_MoE/|predict_moe|piqa_ppl"
+  # "/data/cyx/models/out_hellaswag_lora/|dynamic_moe|hellaswag_ppl"
+  # "/data/cyx/models/out_hellaswag_lora_k1/|dynamic_moe|hellaswag_ppl"
+  # "/data/cyx/models/out_hellaswag_lora_k2/|dynamic_moe|hellaswag_ppl"
 )
 
 total_start_ts=$(date +%s)

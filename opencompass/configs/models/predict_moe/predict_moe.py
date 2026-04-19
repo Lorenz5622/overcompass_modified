@@ -40,7 +40,7 @@ models = [
             enable_expert_stats=False,  # 启用专家统计（仅在 Predict MoE 中生效）
             expert_stats_path='./expert_usage_stats.json',  # 统计结果保存路径
         ),
-        batch_size=192,
+        batch_size=16,
         run_cfg=dict(num_gpus=1, num_procs=16),
     )
 ]

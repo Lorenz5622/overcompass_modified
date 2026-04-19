@@ -9,7 +9,7 @@ start_hr=$(date '+%F %T')
 echo "==> START: ${start_hr}"
 
 python run.py \
-  --datasets siqa_ppl \
+  --datasets ARC_e_ppl \
   --models dynamic_moe \
   --debug |& tee run.log
 

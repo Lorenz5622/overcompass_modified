@@ -182,17 +182,35 @@ class HuggingFace(BaseModel):
             self.tokenizer.eos_token = '</s>'
             self.tokenizer.pad_token_id = 0
 
+    def _normalize_torch_dtype(self, torch_dtype):
+        if isinstance(torch_dtype, torch.dtype) or torch_dtype is None:
+            return torch_dtype
+        if isinstance(torch_dtype, str):
+            normalized = {
+                'torch.float16': torch.float16,
+                'float16': torch.float16,
+                'fp16': torch.float16,
+                'torch.bfloat16': torch.bfloat16,
+                'bfloat16': torch.bfloat16,
+                'bf16': torch.bfloat16,
+                'torch.float': torch.float,
+                'torch.float32': torch.float32,
+                'float': torch.float,
+                'float32': torch.float32,
+                'auto': 'auto',
+                'None': None,
+                'none': None,
+            }.get(torch_dtype)
+            if normalized is not None or torch_dtype in ('None', 'none'):
+                return normalized
+        raise ValueError(f'Unsupported torch_dtype: {torch_dtype!r}')
+
     def _set_model_kwargs_torch_dtype(self, model_kwargs):
         if 'torch_dtype' not in model_kwargs:
             torch_dtype = torch.float16
         else:
-            torch_dtype = {
-                'torch.float16': torch.float16,
-                'torch.bfloat16': torch.bfloat16,
-                'torch.float': torch.float,
-                'auto': 'auto',
-                'None': None
-            }.get(model_kwargs['torch_dtype'])
+            torch_dtype = self._normalize_torch_dtype(
+                model_kwargs['torch_dtype'])
         self.logger.debug(f'HF using torch_dtype: {torch_dtype}')
         if torch_dtype is not None:
             model_kwargs['torch_dtype'] = torch_dtype
@@ -834,6 +852,8 @@ class HuggingFaceDynamicMoE(HuggingFace):
         routing_eval_store_token_counts = bool(
             model_kwargs.pop('routing_eval_store_token_counts', True))
         expert_stats_path = model_kwargs.pop('expert_stats_path', './expert_usage_stats.json')
+        model_torch_dtype = self._normalize_torch_dtype(
+            model_kwargs.get('torch_dtype', torch.float16))
         self.moe_package_name = moe_package_name
         self.moe_modeling_module = moe_modeling_module
         self.moe_config_module = moe_config_module
@@ -935,7 +955,7 @@ class HuggingFaceDynamicMoE(HuggingFace):
             path,
             from_tf=False,
             config=model_config,
-            torch_dtype=torch.float16,
+            torch_dtype=model_torch_dtype,
             low_cpu_mem_usage=True,
         ).cuda()
         self.model.eval()

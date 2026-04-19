@@ -1,14 +1,14 @@
-# configs/models/dynamic_moe/dynamic_moe_dm.py
-# 新版 Qwen_MoE(dm) 执行代码配置
+# configs/models/dynamic_moe/dynamic_moe_yuan.py
+# Yuan 路由版 Qwen_MoE 执行代码配置
 import os
 
 from opencompass.models import HuggingFaceDynamicMoE
 import torch
 
-default_model_path = '/data/cyx/models/out_piqa_CAR_v3'
+default_model_path = '/data/cyx/models/your_dynamic_moe_yuan_ckpt'
 model_path = os.environ.get('OC_MODEL_PATH', default_model_path)
 tokenizer_path = os.environ.get('OC_TOKENIZER_PATH', model_path)
-model_name = os.environ.get('OC_MODEL_NAME', 'dynamic_moe_dm')
+model_name = os.environ.get('OC_MODEL_NAME', 'dynamic_moe_yuan')
 
 models = [
     dict(
@@ -17,13 +17,13 @@ models = [
         path=model_path,
         tokenizer_path=tokenizer_path,
         moe_package_name='Qwen_MoE',
-        moe_modeling_module='modeling_moe_dm',
-        moe_config_module='configuration_moe_dm',
+        moe_modeling_module='modeling_moe_yuan',
+        moe_config_module='configuration_moe_yuan',
         max_out_len=128,
         model_kwargs=dict(
             trust_remote_code=True,
             device_map='auto',
-            torch_dtype=torch.float,
+            torch_dtype=torch.float16,
             enable_expert_stats=False,
             enable_routing_eval=False,
             routing_eval_with_layers=False,

@@ -12,13 +12,13 @@ models = [
         moe_package_name='Predict_MoE',
         moe_modeling_module='modeling_moe_ori',
         moe_config_module='configuration_moe',
-        max_out_len=192,
+        max_out_len=128,
         model_kwargs=dict(
             trust_remote_code=True,
             device_map='auto',
             torch_dtype=torch.bfloat16,
         ),
         batch_size=8,
-        run_cfg=dict(num_gpus=4),
+        run_cfg=dict(num_gpus=1),
     )
 ]

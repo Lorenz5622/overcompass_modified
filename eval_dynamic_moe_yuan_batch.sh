@@ -5,10 +5,10 @@ set -euo pipefail
 GPU_ID="${GPU_ID:-0}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 RUN_PY="${RUN_PY:-run.py}"
-MODEL_CFG="${MODEL_CFG:-dynamic_moe_dm}"
+MODEL_CFG="${MODEL_CFG:-dynamic_moe_yuan}"
 DATASET="${DATASET:-piqa_ppl}"
 LOG_DIR="${LOG_DIR:-./logs}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-./outputs/dynamic_moe_dm_batch}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-./outputs/dynamic_moe_yuan_batch}"
 EXTRA_ARGS=(--debug)
 
 # 每一项格式:
@@ -18,19 +18,8 @@ EXTRA_ARGS=(--debug)
 #   数据集为空时默认使用上面的 DATASET
 #   结果名为空时默认使用模型目录名
 declare -a EVAL_SPECS=(
-  # "/data/cyx/models/out_dm_cb_za02_r175_tp032_b22|/data/cyx/models/out_dm_cb_za02_r175_tp032_b22|piqa_ppl|out_dm_cb_za02_r175_tp032_b22"
-  # "/data/cyx/models/out_dm_cb_za02_r175_tp040_b22_highstart|/data/cyx/models/out_dm_cb_za02_r175_tp040_b22_highstart|piqa_ppl|out_dm_cb_za02_r175_tp040_b22_highstart"
-  # "/data/cyx/models/out_dm_cb_za02_r175_tp030_b22_later|/data/cyx/models/out_dm_cb_za02_r175_tp030_b22_later|piqa_ppl|out_dm_cb_za02_r175_tp030_b22_later"
-  # "/data/cyx/models/out_dm_cb_za02_r175_tp032_b22_late|/data/cyx/models/out_dm_cb_za02_r175_tp032_b22_late|piqa_ppl|out_dm_cb_za02_r175_tp032_b22_late"
-  # "/data/cyx/models/out_dm_cb_za02_r175_tp031_b22_late_t085|/data/cyx/models/out_dm_cb_za02_r175_tp031_b22_late_t085|piqa_ppl|out_dm_cb_za02_r175_tp031_b22_late_t085"
-  "/data/cyx/models/CB_norestrict_abl_newlr01|/data/cyx/models/CB_norestrict_abl_newlr01|piqa_ppl|CB_norestrict_abl_newlr01"
-  "/data/cyx/models/CB_norestrict_abl_ctx01|/data/cyx/models/CB_norestrict_abl_ctx01|piqa_ppl|CB_norestrict_abl_ctx01"
-  
-  "/data/cyx/models/CB_norestrict_abl_noctx|/data/cyx/models/CB_norestrict_abl_noctx|piqa_ppl|CB_norestrict_abl_noctx"
-  # "/data/cyx/models/out_dm_cb_za02_r175_tp032_b22_late_a2_tpf0290_t200_c0012_lrm112|/data/cyx/models/out_dm_cb_za02_r175_tp032_b22_late_a2_tpf0290_t200_c0012_lrm112|piqa_ppl|out_dm_cb_za02_r175_tp032_b22_late_a2_tpf0290_t200_c0012_lrm112"
-  # "/data/cyx/models/out_dm_cb_za02_r175_tp032_b22_late_a2_tpf0288_t198_c0012_lrm115|/data/cyx/models/out_dm_cb_za02_r175_tp032_b22_late_a2_tpf0288_t198_c0012_lrm115|piqa_ppl|out_dm_cb_za02_r175_tp032_b22_late_a2_tpf0288_t198_c0012_lrm115"
-  # "/data/cyx/models/out_dm_cb_za02_r175_tp032_b22_late_a2_tpf0288_t198_c0012_lrm112|/data/cyx/models/out_dm_cb_za02_r175_tp032_b22_late_a2_tpf0288_t198_c0012_lrm112|piqa_ppl|out_dm_cb_za02_r175_tp032_b22_late_a2_tpf0288_t198_c0012_lrm112"
-  
+  "/data/cyx/models/out_piqa_yuan_lora|/data/cyx/models/out_piqa_yuan_lora|piqa_ppl|yuan_moe"
+  # "/data/cyx/models/your_dynamic_moe_yuan_ckpt|/data/cyx/models/your_dynamic_moe_yuan_ckpt|hellaswag_ppl|your_dynamic_moe_yuan_ckpt"
 )
 # ==========================
 
