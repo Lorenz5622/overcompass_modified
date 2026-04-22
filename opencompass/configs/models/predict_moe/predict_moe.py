@@ -37,7 +37,8 @@ models = [
             trust_remote_code=True,
             device_map="auto",
             torch_dtype=torch.float16,
-            enable_expert_stats=False,  # 启用专家统计（仅在 Predict MoE 中生效）
+            enable_expert_stats=True,  # 启用专家统计（仅在 Predict MoE 中生效）
+            enable_kpredictor_entropy_stats=True,  # 是否统计每层 KPredictor 输出 p(K) 的熵
             expert_stats_path='./expert_usage_stats.json',  # 统计结果保存路径
         ),
         batch_size=16,

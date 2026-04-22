@@ -30,9 +30,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-DEFAULT_COMPLETE = '/home/cyx/opencompass/expert_usage_stats_dynamic_moe_complete.json'
-DEFAULT_BASELINE = '/home/cyx/opencompass/expert_usage_stats_dynamic_moe_no_hardening.json'
+DEFAULT_COMPLETE = '/home/cyx/opencompass/expert_usage_stats_predict_moe_complete.json'
+DEFAULT_BASELINE = '/home/cyx/opencompass/expert_usage_stats_predict_moe_no_harden.json'
 DEFAULT_OUTPUT = '/home/cyx/opencompass/expert_usage_compare_complete_vs_no_hardening.png'
+
+
+def entropy_from_probs(probs: Sequence[float]) -> float:
+    arr = np.asarray(probs, dtype=float)
+    valid = arr > 0.0
+    if not np.any(valid):
+        return 0.0
+    return float(-(arr[valid] * np.log2(arr[valid])).sum())
 
 
 def parse_args() -> argparse.Namespace:
@@ -88,31 +96,48 @@ def load_usage(path: str, max_k: int) -> Dict[str, object]:
         data = json.load(f)
 
     layers = data['per_layer']
+    counts: List[List[int]] = []
     probs: List[List[float]] = []
     dominant_share: List[float] = []
     avg_k: List[float] = []
     p2_minus_p3: List[float] = []
+    entropy: List[float] = []
     mode_k: List[int] = []
     layer_ids: List[int] = []
 
     for layer in layers:
         total = layer['total_tokens']
         dist = {int(k): int(v) for k, v in layer['distribution'].items()}
+        count_row = [dist.get(k, 0) for k in range(1, max_k + 1)]
         row = [dist.get(k, 0) / total for k in range(1, max_k + 1)]
+        counts.append(count_row)
         probs.append(row)
         dominant_share.append(max(row) if row else 0.0)
         avg_k.append(float(layer['avg_k']))
         p2_minus_p3.append(row[1] - row[2] if max_k >= 3 else 0.0)
+        entropy.append(entropy_from_probs(row))
         mode_k.append(int(np.argmax(row)) + 1 if row else 0)
         layer_ids.append(int(layer['layer_idx']))
+
+    counts_array = np.array(counts, dtype=float)
+    probs_array = np.array(probs, dtype=float)
+    entropy_array = np.array(entropy, dtype=float)
+    total_counts = counts_array.sum(axis=0)
+    total_prob = total_counts / total_counts.sum() if total_counts.sum() > 0 else np.zeros(max_k, dtype=float)
 
     return {
         'model_type': data.get('model_type', 'unknown'),
         'layers': layer_ids,
-        'probs': np.array(probs, dtype=float),
+        'counts': counts_array,
+        'probs': probs_array,
         'dominant_share': np.array(dominant_share, dtype=float),
         'avg_k': np.array(avg_k, dtype=float),
         'p2_minus_p3': np.array(p2_minus_p3, dtype=float),
+        'entropy': entropy_array,
+        'mean_entropy': float(entropy_array.mean()) if len(entropy_array) > 0 else 0.0,
+        'sum_entropy': float(entropy_array.sum()),
+        'global_prob': total_prob,
+        'global_entropy': entropy_from_probs(total_prob),
         'mode_k': np.array(mode_k, dtype=int),
     }
 
@@ -121,12 +146,18 @@ def summarize(name: str, usage: Dict[str, object]) -> str:
     dominant_share = usage['dominant_share']
     avg_k = usage['avg_k']
     p2_minus_p3 = usage['p2_minus_p3']
+    mean_entropy = usage['mean_entropy']
+    sum_entropy = usage['sum_entropy']
+    global_entropy = usage['global_entropy']
     mode_k = usage['mode_k']
     return (
         f'{name}: '
         f'mean dominant-share={dominant_share.mean():.3f}, '
         f'mean avg_k={avg_k.mean():.3f}, '
         f'mean (p2-p3)={p2_minus_p3.mean():.3f}, '
+        f'mean layer-entropy={mean_entropy:.3f} bits, '
+        f'sum layer-entropy={sum_entropy:.3f} bits, '
+        f'global entropy={global_entropy:.3f} bits, '
         f'layers with mode=2: {(mode_k == 2).sum()}'
     )
 
