@@ -19,6 +19,11 @@ EXTRA_ARGS=(--debug)
 #   结果名为空时默认使用模型目录名
 declare -a EVAL_SPECS=(
   "/data/cyx/models/out_piqa_yuan_lora|/data/cyx/models/out_piqa_yuan_lora|piqa_ppl|yuan_moe"
+  "/data/cyx/models/out_arc_challenge_yuan_lora|/data/cyx/models/out_arc_challenge_yuan_lora|arc_c_ppl|yuan_moe"
+  "/data/cyx/models/out_arc_easy_yuan_lora|/data/cyx/models/out_arc_easy_yuan_lora|arc_e_ppl|yuan_moe"
+  "/data/cyx/models/out_oqa_yuan_lora|/data/cyx/models/out_oqa_yuan_lora|obqa_ppl|yuan_moe"
+  # "/data/cyx/models/out_piqa_yuan_lora|/data/cyx/models/out_piqa_yuan_lora|piqa_ppl|yuan_moe"
+  "/data/cyx/models/out_siqa_yuan_lora|/data/cyx/models/out_siqa_yuan_lora|siqa_ppl|yuan_moe"
   # "/data/cyx/models/your_dynamic_moe_yuan_ckpt|/data/cyx/models/your_dynamic_moe_yuan_ckpt|hellaswag_ppl|your_dynamic_moe_yuan_ckpt"
 )
 # ==========================

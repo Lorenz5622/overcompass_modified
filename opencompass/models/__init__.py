@@ -22,6 +22,8 @@ from .hf_qwen_moe_custom import HuggingFaceQwenMoeCustom  # noqa: F401
 from .huggingface_above_v4_33 import HuggingFacewithChatTemplate  # noqa: F401
 from .huggingface import HuggingFaceDynamicMoE  # noqa: F401
 from .huggingface import HuggingFacePredictMoE  # noqa: F401
+from .huggingface_dm import HuggingFaceDMMoE  # noqa: F401
+from .huggingface_yuan import HuggingFaceYuanMoE  # noqa: F401
 from .hunyuan_api import Hunyuan  # noqa: F401
 from .intern_model import InternLM  # noqa: F401
 from .interntrain import InternTrain  # noqa: F401

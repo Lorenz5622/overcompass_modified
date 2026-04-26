@@ -2,7 +2,7 @@
 # 新版 Qwen_MoE(dm) 执行代码配置
 import os
 
-from opencompass.models import HuggingFaceDynamicMoE
+from opencompass.models import HuggingFaceDMMoE
 import torch
 
 default_model_path = '/data/cyx/models/out_piqa_CAR_v3'
@@ -12,7 +12,7 @@ model_name = os.environ.get('OC_MODEL_NAME', 'dynamic_moe_dm')
 
 models = [
     dict(
-        type=HuggingFaceDynamicMoE,
+        type=HuggingFaceDMMoE,
         abbr=model_name,
         path=model_path,
         tokenizer_path=tokenizer_path,
@@ -24,8 +24,11 @@ models = [
             trust_remote_code=True,
             device_map='auto',
             torch_dtype=torch.float,
-            enable_expert_stats=False,
+            enable_expert_stats=True,
+            enable_kpredictor_entropy_stats=False,
+            enable_theoretical_flops_stats=True,
             enable_routing_eval=False,
+            enable_token_routing_tsv=False,
             routing_eval_with_layers=False,
             routing_eval_prob_eps=1e-8,
             routing_eval_top_p=0.7,
