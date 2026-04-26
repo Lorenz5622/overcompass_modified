@@ -23,8 +23,8 @@ declare -a EVAL_SPECS=(
   # "/data/cyx/models/out_dm_cb_za02_r175_tp030_b22_later|/data/cyx/models/out_dm_cb_za02_r175_tp030_b22_later|piqa_ppl|out_dm_cb_za02_r175_tp030_b22_later"
   # "/data/cyx/models/out_dm_cb_za02_r175_tp032_b22_late|/data/cyx/models/out_dm_cb_za02_r175_tp032_b22_late|piqa_ppl|out_dm_cb_za02_r175_tp032_b22_late"
   # "/data/cyx/models/out_dm_cb_za02_r175_tp031_b22_late_t085|/data/cyx/models/out_dm_cb_za02_r175_tp031_b22_late_t085|piqa_ppl|out_dm_cb_za02_r175_tp031_b22_late_t085"
-  "/data/cyx/models/CB_norestrict_abl_newlr01_ctx03|/data/cyx/models/CB_norestrict_abl_newlr01_ctx03|piqa_ppl|CB_norestrict_abl_newlr01_ctx03"
-  "/data/cyx/models/CB_norestrict_abl_newlr005_ctx03|/data/cyx/models/CB_norestrict_abl_newlr005_ctx03|piqa_ppl|CB_norestrict_abl_newlr005_ctx03"
+  "/data/cyx/models/fv1|/data/cyx/models/fv1|piqa_ppl|fv1"
+  # "/data/cyx/models/CB_norestrict_abl_newlr005_ctx03|/data/cyx/models/CB_norestrict_abl_newlr005_ctx03|piqa_ppl|CB_norestrict_abl_newlr005_ctx03"
   # "/data/cyx/models/CB_norestrict_abl_newlr01_ctx01|/data/cyx/models/CB_norestrict_abl_newlr01_ctx01|piqa_ppl|CB_norestrict_abl_newlr01_ctx01"
   # "/data/cyx/models/CB_norestrict_abl_ctx01|/data/cyx/models/CB_norestrict_abl_ctx01|piqa_ppl|CB_norestrict_abl_ctx01"
   

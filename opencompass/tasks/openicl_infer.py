@@ -35,6 +35,17 @@ class OpenICLInferTask(BaseTask):
         self.num_procs = run_cfg.get('num_procs', 1)
         self.logger = get_logger()
 
+    @staticmethod
+    def _build_expert_stats_path(model_cfg, dataset_cfg):
+        dataset_name = str(dataset_cfg.get('abbr')
+                           or dataset_cfg.get('name')
+                           or 'dataset')
+        dataset_name = dataset_name.replace('/', '_').replace(' ', '_')
+        model_abbr = model_abbr_from_cfg(model_cfg)
+        if 'reinforce' in str(model_abbr):
+            return f'./expert_usage_stats_reinforce_{dataset_name}.json'
+        return f'./expert_usage_stats_{model_abbr}_{dataset_name}.json'
+
     def get_command(self, cfg_path, template):
         """Get the command template for the task.
 
@@ -73,6 +84,8 @@ class OpenICLInferTask(BaseTask):
                 self.model = build_model_from_cfg(model_cfg)
 
             for dataset_cfg in dataset_cfgs:
+                if hasattr(self.model, 'reset_expert_usage_stats'):
+                    self.model.reset_expert_usage_stats()
                 self.model_cfg = model_cfg
                 self.dataset_cfg = dataset_cfg
                 self.infer_cfg = self.dataset_cfg['infer_cfg']
@@ -87,16 +100,19 @@ class OpenICLInferTask(BaseTask):
                 if osp.exists(out_path):
                     continue
                 self._inference()
-
-        # === [NEW] 保存专家使用统计（在所有推理完成后） ===
-        if hasattr(self.model, 'save_expert_usage_stats'):
-            try:
-                model_abbr = model_abbr_from_cfg(model_cfg)
-                stats_path = f'./expert_usage_stats_{model_abbr}.json'
-                self.model.save_expert_usage_stats(stats_path)
-                self.logger.info(f'Expert usage stats saved to {stats_path}')
-            except Exception as e:
-                self.logger.debug(f'Failed to save expert usage stats: {e}')
+                if hasattr(self.model, 'save_expert_usage_stats'):
+                    try:
+                        stats_path = self._build_expert_stats_path(
+                            model_cfg, dataset_cfg)
+                        self.model.save_expert_usage_stats(stats_path)
+                        self.logger.info(
+                            f'Expert usage stats saved to {stats_path}')
+                    except Exception as e:
+                        self.logger.debug(
+                            f'Failed to save expert usage stats: {e}')
+                    finally:
+                        if hasattr(self.model, 'reset_expert_usage_stats'):
+                            self.model.reset_expert_usage_stats()
 
     def _inference(self):
         self.logger.info(

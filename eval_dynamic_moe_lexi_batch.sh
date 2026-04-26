@@ -4,16 +4,20 @@ set -euo pipefail
 GPU_ID="${GPU_ID:-0}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 RUN_PY="${RUN_PY:-run.py}"
-MODEL_CFG="${MODEL_CFG:-dynamic_moe_reinforce_layerk}"
+MODEL_CFG="${MODEL_CFG:-dynamic_moe_lexi}"
 DATASET="${DATASET:-piqa_ppl}"
 LOG_DIR="${LOG_DIR:-./logs}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-./outputs/dynamic_moe_reinforce_layerk_batch}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-./outputs/dynamic_moe_lexi_batch}"
+LEXI_PYTHONPATH="${LEXI_PYTHONPATH:-/home/cyx/Predict_MoE}"
 EXTRA_ARGS=(--debug)
 
 declare -a EVAL_SPECS=(
-  "/data/cyx/models/reinforce_layerk|/data/cyx/models/reinforce_layerk|piqa_ppl|reinforce_layerk"
-  "/data/cyx/models/reinforce_layerk_siqa|/data/cyx/models/reinforce_layerk_siqa|siqa_ppl|reinforce_layerk"
-  "/data/cyx/models/reinforce_layerk_winogrande|/data/cyx/models/reinforce_layerk_winogrande|winograd_ppl|reinforce_layerk"
+  # "/data/cyx/models/LExI|/data/cyx/models/LExI|piqa_ppl|lexi"
+  # "/data/cyx/models/LExI|/data/cyx/models/LExI|piqa_ppl|lexi"
+  # # "/data/cyx/models/LExI|/data/cyx/models/LExI|arc_e_ppl|lexi"
+  "/data/cyx/models/LExI|/data/cyx/models/LExI|winograd_ppl|lexi"
+  # "/data/cyx/models/LExI|/data/cyx/models/LExI|obqa_ppl|lexi"
+  # "/data/cyx/models/LExI|/data/cyx/models/LExI|arc_c_ppl|lexi"
 )
 
 mkdir -p "$LOG_DIR" "$OUTPUT_ROOT"
@@ -86,9 +90,11 @@ run_one() {
   echo "dataset        : ${dataset}"
   echo "work_dir       : ${work_dir}"
   echo "log_file       : ${log_file}"
+  echo "pythonpath     : ${LEXI_PYTHONPATH}"
   echo "========================================"
 
   if CUDA_VISIBLE_DEVICES="$GPU_ID" \
+    PYTHONPATH="${LEXI_PYTHONPATH}${PYTHONPATH:+:${PYTHONPATH}}" \
     OC_MODEL_PATH="$resolved_model_path" \
     OC_TOKENIZER_PATH="$resolved_tokenizer_path" \
     OC_MODEL_NAME="$model_name" \

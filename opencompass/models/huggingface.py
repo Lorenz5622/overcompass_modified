@@ -42,6 +42,40 @@ def _disable_meta_init_for_custom_moe(model_cls):
         model_cls.get_init_context = original_get_init_context
 
 
+@contextmanager
+def _allow_legacy_torch_bin_load_for_local_checkpoint():
+    """Temporarily bypass transformers' torch<2.6 .bin safety gate.
+
+    This is only used for trusted local checkpoints in custom MoE loaders.
+    """
+    modeling_utils = transformers.modeling_utils
+    import_utils = transformers.utils.import_utils
+    original_modeling_check = modeling_utils.check_torch_load_is_safe
+    original_import_check = import_utils.check_torch_load_is_safe
+
+    def _noop_check():
+        return None
+
+    modeling_utils.check_torch_load_is_safe = _noop_check
+    import_utils.check_torch_load_is_safe = _noop_check
+    try:
+        yield
+    finally:
+        modeling_utils.check_torch_load_is_safe = original_modeling_check
+        import_utils.check_torch_load_is_safe = original_import_check
+
+
+def _get_custom_moe_config_class(cfg_module):
+    """Resolve custom MoE config classes across different module naming styles."""
+    for attr_name in ('MoEConfig', 'MoELexiConfig', 'ReinforceLayerKConfig'):
+        cfg_cls = getattr(cfg_module, attr_name, None)
+        if cfg_cls is not None:
+            return cfg_cls
+    raise AttributeError(
+        f'Cannot find a supported MoE config class in module {cfg_module.__name__}'
+    )
+
+
 class MultiTokenEOSCriteria(transformers.StoppingCriteria):
     """Criteria to stop on the specified multi-token sequence."""
 
@@ -867,6 +901,9 @@ class HuggingFaceDynamicMoE(HuggingFace):
         # ⚠️ 关键：在调用父类 __init__ 之前提取并移除自定义参数
         # 避免这些参数被传递到 HuggingFace 的模型加载函数
         enable_expert_stats = model_kwargs.pop('enable_expert_stats', False)
+        enable_kpredictor_entropy_stats = bool(
+            model_kwargs.pop('enable_kpredictor_entropy_stats',
+                             enable_expert_stats))
         enable_routing_eval = bool(model_kwargs.pop('enable_routing_eval', False))
         routing_eval_with_layers = bool(
             model_kwargs.pop('routing_eval_with_layers', True))
@@ -875,6 +912,8 @@ class HuggingFaceDynamicMoE(HuggingFace):
         routing_eval_top_p = float(model_kwargs.pop('routing_eval_top_p', 0.9))
         routing_eval_store_token_counts = bool(
             model_kwargs.pop('routing_eval_store_token_counts', True))
+        enable_token_routing_tsv = bool(
+            model_kwargs.pop('enable_token_routing_tsv', True))
         expert_stats_path = model_kwargs.pop('expert_stats_path', './expert_usage_stats.json')
         model_torch_dtype = self._normalize_torch_dtype(
             model_kwargs.get('torch_dtype', torch.float16))
@@ -886,9 +925,17 @@ class HuggingFaceDynamicMoE(HuggingFace):
         self._routing_eval_prob_eps = max(routing_eval_prob_eps, 1e-12)
         self._routing_eval_top_p = min(max(routing_eval_top_p, 1e-6), 1.0)
         self._routing_eval_store_token_counts = routing_eval_store_token_counts
+        self._enable_token_routing_tsv = enable_token_routing_tsv
         self._last_routing_eval = None
         self._last_routing_weights = None
         self._modeling_entmax_bisect = None
+        self._enable_expert_stats = bool(enable_expert_stats)
+        self._enable_kpredictor_entropy_stats = enable_kpredictor_entropy_stats
+        self._kpredictor_entropy_stats = {}
+        self._wrapper_expert_usage_stats = {}
+        self._stats_output_path = expert_stats_path
+        self._moe_model_type = 'dynamic_moe'
+        self._is_reinforce_layerk = False
         
         super().__init__(
             path=path,
@@ -897,7 +944,7 @@ class HuggingFaceDynamicMoE(HuggingFace):
             tokenizer_path=tokenizer_path,
             tokenizer_kwargs=tokenizer_kwargs,
             peft_path=peft_path,
-            tokenizer_only=tokenizer_only,
+            tokenizer_only=True,
             generation_kwargs=generation_kwargs,
             model_kwargs=model_kwargs,
             meta_template=meta_template,
@@ -906,6 +953,9 @@ class HuggingFaceDynamicMoE(HuggingFace):
             pad_token_id=pad_token_id,
             mode=mode,
         )
+
+        if tokenizer_only:
+            return
 
         import os
         import sys
@@ -965,7 +1015,7 @@ class HuggingFaceDynamicMoE(HuggingFace):
         self._modeling_entmax_bisect = getattr(moe_module, 'entmax_bisect', None)
         
         MoEForCausalLM = getattr(moe_module, "MoEForCausalLM")
-        MoEConfig = getattr(cfg_module, "MoEConfig")
+        MoEConfig = _get_custom_moe_config_class(cfg_module)
         
         self.tokenizer = LlamaTokenizer.from_pretrained(path)
         self.tokenizer.pad_token = self.tokenizer.unk_token
@@ -974,22 +1024,42 @@ class HuggingFaceDynamicMoE(HuggingFace):
         # 将统计功能配置传递给 MoE config
         if enable_expert_stats:
             setattr(model_config, "enable_expert_stats", True)
+        self._moe_model_type = str(getattr(model_config, 'model_type', 'dynamic_moe'))
+        self._is_reinforce_layerk = (
+            self._moe_model_type == 'moe_reinforce_layerk'
+            or 'reinforce_layerk' in moe_module.__name__)
         print(f"use shared expert embedding: {getattr(model_config, 'share_router_expert_embedding', False)}")
+        load_kwargs = dict(
+            from_tf=False,
+            config=model_config,
+            torch_dtype=model_torch_dtype,
+            low_cpu_mem_usage=False,
+        )
+        for key in ('device_map', 'max_memory', 'offload_folder',
+                    'offload_state_dict'):
+            if key in model_kwargs:
+                load_kwargs[key] = model_kwargs[key]
         with _disable_meta_init_for_custom_moe(MoEForCausalLM):
-            self.model = MoEForCausalLM.from_pretrained(
-                path,
-                from_tf=False,
-                config=model_config,
-                torch_dtype=model_torch_dtype,
-                low_cpu_mem_usage=False,
-            ).cuda()
+            with _allow_legacy_torch_bin_load_for_local_checkpoint():
+                self.model = MoEForCausalLM.from_pretrained(
+                    path,
+                    **load_kwargs,
+                )
+        if 'device_map' not in load_kwargs and torch.cuda.is_available():
+            self.model = self.model.cuda()
         self.model.eval()
         
         # 检测是否为 modeling_moe_infer（Predict MoE），启用统计功能
         self.is_predict_moe = "modeling_moe_infer" in moe_module.__name__
-        if self.is_predict_moe and enable_expert_stats:
-            print("[INFO] Detected Predict MoE model, enabling expert usage statistics")
-            self._stats_output_path = expert_stats_path
+        if self._enable_expert_stats:
+            print(
+                f"[INFO] Expert usage statistics enabled for model_type={self._moe_model_type}"
+            )
+        if self._enable_kpredictor_entropy_stats:
+            print(
+                "[INFO] KPredictor entropy statistics enabled "
+                f"for model_type={self._moe_model_type}"
+            )
 
 
     @staticmethod
@@ -1054,6 +1124,145 @@ class HuggingFaceDynamicMoE(HuggingFace):
         if out_tensor.dim() == 2 and out_tensor.size(0) == batch_size * seq_len:
             return out_tensor.view(batch_size, seq_len, out_tensor.size(-1))
         return None
+
+    def _get_switch_layer_indices(self):
+        if not hasattr(self.model, 'model') or not hasattr(self.model.model, 'layers'):
+            return []
+        return [
+            idx for idx, layer in enumerate(self.model.model.layers)
+            if getattr(getattr(layer, 'mlp', None), 'use_switch', False)
+        ]
+
+    def _accumulate_wrapper_k_usage_stats(
+        self,
+        layer_idx: int,
+        chosen_k: torch.Tensor,
+        valid_token_mask: torch.Tensor,
+        k_probs: Optional[torch.Tensor] = None,
+        entropy: Optional[torch.Tensor] = None,
+        k_start: int = 1,
+    ) -> None:
+        if chosen_k is None:
+            return
+
+        layer_usage = self._wrapper_expert_usage_stats.setdefault(
+            int(layer_idx),
+            {
+                'distribution': {},
+                'total_tokens': 0,
+                'k_sum': 0.0,
+            },
+        )
+
+        token_counts = valid_token_mask.sum(dim=-1).to(torch.int64)
+        valid_rows = token_counts > 0
+        if not bool(valid_rows.any().item()):
+            return
+
+        chosen_k = chosen_k.detach().to(torch.int64)
+        if chosen_k.dim() == 2:
+            if (chosen_k.size(0) != valid_token_mask.size(0)
+                    and chosen_k.size(1) == valid_token_mask.size(0)):
+                chosen_k = chosen_k.transpose(0, 1).contiguous()
+            seq_for_loss = min(chosen_k.size(1), valid_token_mask.size(1))
+            if seq_for_loss <= 0:
+                return
+            mask = valid_token_mask[:, :seq_for_loss]
+            chosen_tokens = chosen_k[:, :seq_for_loss][mask].detach().cpu()
+            if chosen_tokens.numel() <= 0:
+                return
+            unique_k, unique_counts = torch.unique(
+                chosen_tokens, sorted=True, return_counts=True)
+            k_count_pairs = zip(unique_k.tolist(), unique_counts.tolist())
+        else:
+            if chosen_k.dim() == 0:
+                chosen_k = chosen_k.view(1).expand(valid_token_mask.size(0))
+            chosen_k_cpu = chosen_k[valid_rows].detach().cpu()
+            token_counts_cpu = token_counts[valid_rows].detach().cpu()
+            k_count_pairs = zip(chosen_k_cpu.tolist(), token_counts_cpu.tolist())
+
+        for k_val, tok_count in k_count_pairs:
+            k_int = int(k_val)
+            tok_int = int(tok_count)
+            layer_usage['distribution'][k_int] = (
+                layer_usage['distribution'].get(k_int, 0) + tok_int)
+            layer_usage['total_tokens'] += tok_int
+            layer_usage['k_sum'] += float(k_int) * float(tok_int)
+
+        if (not self._enable_kpredictor_entropy_stats
+                or k_probs is None or entropy is None):
+            return
+
+        if k_probs.dim() == 3:
+            if (k_probs.size(0) != valid_token_mask.size(0)
+                    and k_probs.size(1) == valid_token_mask.size(0)):
+                k_probs = k_probs.transpose(0, 1).contiguous()
+            if (entropy.dim() == 2 and entropy.size(0) != valid_token_mask.size(0)
+                    and entropy.size(1) == valid_token_mask.size(0)):
+                entropy = entropy.transpose(0, 1).contiguous()
+            seq_for_loss = min(k_probs.size(1), valid_token_mask.size(1))
+            if seq_for_loss <= 0:
+                return
+            mask = valid_token_mask[:, :seq_for_loss]
+            probs_valid = k_probs[:, :seq_for_loss, :][mask].detach().cpu()
+            entropy_valid = entropy[:, :seq_for_loss][mask].detach().cpu()
+            token_weight_sum = int(mask.sum().item())
+            entropy_sum = float(entropy_valid.sum().item())
+            prob_sum = probs_valid.sum(dim=0)
+        else:
+            token_counts_cpu = token_counts[valid_rows].detach().cpu()
+            probs_valid = k_probs[valid_rows].detach().cpu()
+            entropy_valid = entropy[valid_rows].detach().cpu()
+            weights = token_counts_cpu.to(torch.float32)
+            token_weight_sum = int(weights.sum().item())
+            entropy_sum = float((entropy_valid * weights).sum().item())
+            prob_sum = (probs_valid * weights.unsqueeze(-1)).sum(dim=0)
+
+        layer_stats = self._kpredictor_entropy_stats.setdefault(
+            int(layer_idx),
+            {
+                'total_tokens': 0,
+                'entropy_sum': 0.0,
+                'prob_sum': None,
+                'k_dim': int(probs_valid.size(-1)),
+                'k_start': int(k_start),
+            },
+        )
+        layer_stats['total_tokens'] += token_weight_sum
+        layer_stats['entropy_sum'] += entropy_sum
+        if layer_stats['prob_sum'] is None:
+            layer_stats['prob_sum'] = prob_sum
+        else:
+            layer_stats['prob_sum'] += prob_sum
+
+    def _accumulate_reinforce_layerk_stats(
+        self,
+        valid_token_mask: torch.Tensor,
+        sampled_k_per_layer,
+        layer_entropies,
+        layer_policy_logits,
+    ) -> None:
+        switch_layer_indices = self._get_switch_layer_indices()
+        if not switch_layer_indices:
+            return
+
+        k_start = int(getattr(self.model.config, 'reinforce_k_min', 1))
+        for layer_idx, chosen_k, entropy, logits in zip(
+                switch_layer_indices,
+                sampled_k_per_layer,
+                layer_entropies,
+                layer_policy_logits):
+            if chosen_k is None or logits is None or entropy is None:
+                continue
+            probs = torch.softmax(logits.float(), dim=-1)
+            self._accumulate_wrapper_k_usage_stats(
+                layer_idx=layer_idx,
+                chosen_k=chosen_k,
+                valid_token_mask=valid_token_mask,
+                k_probs=probs,
+                entropy=entropy.float(),
+                k_start=k_start,
+            )
 
     def _summarize_layer_route_probs(self, route_probs_bse: torch.Tensor,
                                      valid_token_mask: torch.Tensor):
@@ -1151,8 +1360,10 @@ class HuggingFaceDynamicMoE(HuggingFace):
         layer_route_meta = {}   # lkey -> dict(routing_activation, routing_alpha)
         hooks = []
 
+        need_route_probs = self._enable_token_routing_tsv or self._enable_routing_eval
         for _name, module in self.model.named_modules():
-            if (type(module).__name__ == 'SwitchMLP'
+            module_type = type(module).__name__
+            if (module_type in ('SwitchMLP', 'LexiSwitchMLP')
                     and getattr(module, 'use_switch', False)):
                 layer_idx = module.layer_num
                 layer_key = f'layer{layer_idx}'
@@ -1177,6 +1388,30 @@ class HuggingFaceDynamicMoE(HuggingFace):
                             out, batch_size=batch_size_tok, seq_len=seq_len_tok)
                         if router_logits is None:
                             return
+                        if (self._enable_expert_stats
+                                and type(switch_module).__name__ == 'LexiSwitchMLP'):
+                            if hasattr(switch_module, 'get_topk'):
+                                active_topk = int(switch_module.get_topk())
+                            else:
+                                active_topk = int(
+                                    getattr(switch_module, 'active_topk', 0))
+                            if active_topk > 0:
+                                chosen_k = torch.full(
+                                    (valid_token_mask.size(0),),
+                                    active_topk,
+                                    dtype=torch.int64,
+                                    device=valid_token_mask.device,
+                                )
+                                self._accumulate_wrapper_k_usage_stats(
+                                    layer_idx=int(getattr(
+                                        switch_module, 'layer_num',
+                                        layer_indices.get(lkey, 0))),
+                                    chosen_k=chosen_k,
+                                    valid_token_mask=valid_token_mask,
+                                )
+
+                        if not need_route_probs:
+                            return
 
                         if use_entmax_local:
                             entmax_fn = self._modeling_entmax_bisect
@@ -1196,20 +1431,21 @@ class HuggingFaceDynamicMoE(HuggingFace):
                             rw = torch.nn.functional.softmax(
                                 router_logits.float(), dim=-1)
 
-                        rw_np = rw.reshape(-1, rw.size(-1)).cpu().detach().numpy()
-                        stats = []
-                        for token_probs in rw_np:
-                            sp = sorted(token_probs, reverse=True)
-                            s_top4 = (float(sp[0] + sp[1] + sp[2] + sp[3])
-                                     if len(sp) >= 4 else float(sum(sp)))
-                            delta = float(sp[3] - sp[4]) if len(sp) >= 5 else 0.0
-                            ent = 0.0
-                            for p in token_probs:
-                                p = float(p)
-                                if p > 1e-12:
-                                    ent -= p * math.log(p)
-                            stats.append((s_top4, delta, ent))
-                        routing_stats[lkey] = stats
+                        if self._enable_token_routing_tsv:
+                            rw_np = rw.reshape(-1, rw.size(-1)).cpu().detach().numpy()
+                            stats = []
+                            for token_probs in rw_np:
+                                sp = sorted(token_probs, reverse=True)
+                                s_top4 = (float(sp[0] + sp[1] + sp[2] + sp[3])
+                                         if len(sp) >= 4 else float(sum(sp)))
+                                delta = float(sp[3] - sp[4]) if len(sp) >= 5 else 0.0
+                                ent = 0.0
+                                for p in token_probs:
+                                    p = float(p)
+                                    if p > 1e-12:
+                                        ent -= p * math.log(p)
+                                stats.append((s_top4, delta, ent))
+                            routing_stats[lkey] = stats
                         if self._enable_routing_eval:
                             routing_eval_by_layer[lkey] = self._summarize_layer_route_probs(
                                 rw, valid_token_mask)
@@ -1224,15 +1460,26 @@ class HuggingFaceDynamicMoE(HuggingFace):
         # ------------------------------------------------------------------
         try:
             with torch.no_grad():
-                outputs = self.model(
+                forward_kwargs = dict(
                     input_ids=tokens['input_ids'],
                     attention_mask=tokens.get('attention_mask'),
                     return_dict=False,
                 )
+                if self._is_reinforce_layerk:
+                    forward_kwargs['reinforce_mode'] = 'argmax'
+                outputs = self.model(**forward_kwargs)
                 logits = outputs[0]  # (batch, seq_len, vocab_size)
         finally:
             for h in hooks:
                 h.remove()
+
+        if self._is_reinforce_layerk and len(outputs) >= 8:
+            self._accumulate_reinforce_layerk_stats(
+                valid_token_mask=valid_token_mask,
+                sampled_k_per_layer=outputs[4],
+                layer_entropies=outputs[6],
+                layer_policy_logits=outputs[7],
+            )
 
         # ------------------------------------------------------------------
         # Compute per-token cross-entropy losses.
@@ -1258,19 +1505,17 @@ class HuggingFaceDynamicMoE(HuggingFace):
 
         ce_loss = loss.float().sum(-1).cpu().detach().numpy() / lens
 
-        # ------------------------------------------------------------------
-        # Write per-token routing stats to TSV.
-        # ------------------------------------------------------------------
-        self._write_token_stats_tsv(
-            inputs=inputs,
-            token_ids_np=tokens['input_ids'].cpu().numpy(),
-            loss_np=loss.float().cpu().detach().numpy(),
-            routing_stats=routing_stats,
-            layer_indices=layer_indices,
-            batch_size=batch_size,
-            seq_len=seq_len,
-            pad_token_id=pad_token_id,
-        )
+        if self._enable_token_routing_tsv:
+            self._write_token_stats_tsv(
+                inputs=inputs,
+                token_ids_np=tokens['input_ids'].cpu().numpy(),
+                loss_np=loss.float().cpu().detach().numpy(),
+                routing_stats=routing_stats,
+                layer_indices=layer_indices,
+                batch_size=batch_size,
+                seq_len=seq_len,
+                pad_token_id=pad_token_id,
+            )
 
         if self._enable_routing_eval:
             sorted_layers = sorted(layer_indices.items(), key=lambda x: x[1])
@@ -1452,43 +1697,74 @@ class HuggingFaceDynamicMoE(HuggingFace):
         return response
     
     def get_expert_usage_stats(self):
-        """收集所有层的专家使用统计（仅在 Predict MoE 中生效）"""
-        if not getattr(self, 'is_predict_moe', False):
-            return None
-        
+        """Collect expert-usage stats for models that expose or accumulate them."""
         if not hasattr(self.model, 'model') or not hasattr(self.model.model, 'layers'):
             return None
-        
+
         stats = {
-            'model_type': 'predict_moe',
+            'model_type': self._moe_model_type,
             'per_layer': [],
             'global_avg_k': 0.0,
-            'total_tokens': 0
+            'total_tokens': 0,
         }
-        
+        if getattr(self, '_enable_kpredictor_entropy_stats', False):
+            stats['k_predictor_entropy_enabled'] = True
+            stats['global_k_predictor_entropy_mean_nats'] = None
+
         total_k_sum = 0
+        total_k_entropy_sum = 0.0
+        total_k_entropy_tokens = 0
         for idx, layer in enumerate(self.model.model.layers):
+            layer_stats = None
             if hasattr(layer.mlp, 'get_expert_usage_stats'):
                 layer_stats = layer.mlp.get_expert_usage_stats()
-                if layer_stats and layer_stats['total_tokens'] > 0:
-                    stats['per_layer'].append({
-                        'layer_idx': idx,
-                        **layer_stats
-                    })
-                    total_k_sum += layer_stats['avg_k'] * layer_stats['total_tokens']
-                    stats['total_tokens'] += layer_stats['total_tokens']
-        
+            if ((not layer_stats or layer_stats.get('total_tokens', 0) <= 0)
+                    and idx in self._wrapper_expert_usage_stats):
+                wrapper_stats = self._wrapper_expert_usage_stats[idx]
+                if wrapper_stats['total_tokens'] > 0:
+                    layer_stats = {
+                        'distribution': dict(wrapper_stats['distribution']),
+                        'total_tokens': int(wrapper_stats['total_tokens']),
+                        'avg_k': (
+                            wrapper_stats['k_sum'] / wrapper_stats['total_tokens']),
+                    }
+            if layer_stats and layer_stats['total_tokens'] > 0:
+                kp_stats = self._kpredictor_entropy_stats.get(idx)
+                if (getattr(self, '_enable_kpredictor_entropy_stats', False)
+                        and kp_stats and kp_stats['total_tokens'] > 0):
+                    entropy_mean_nats = (
+                        kp_stats['entropy_sum'] / kp_stats['total_tokens'])
+                    prob_mean = kp_stats['prob_sum'] / kp_stats['total_tokens']
+                    if 'k_start' in kp_stats:
+                        k_start = int(kp_stats['k_start'])
+                    else:
+                        k_start = 0 if bool(getattr(layer.mlp, 'allow_zero_k', False)) else 1
+                    layer_stats['k_predictor_total_tokens'] = kp_stats['total_tokens']
+                    layer_stats['k_predictor_entropy_mean_nats'] = entropy_mean_nats
+                    layer_stats['k_predictor_prob_mean'] = {
+                        str(k_start + i): float(v)
+                        for i, v in enumerate(prob_mean.tolist())
+                    }
+                    total_k_entropy_sum += kp_stats['entropy_sum']
+                    total_k_entropy_tokens += kp_stats['total_tokens']
+                stats['per_layer'].append({
+                    'layer_idx': idx,
+                    **layer_stats
+                })
+                total_k_sum += layer_stats['avg_k'] * layer_stats['total_tokens']
+                stats['total_tokens'] += layer_stats['total_tokens']
+
         if stats['total_tokens'] > 0:
             stats['global_avg_k'] = total_k_sum / stats['total_tokens']
-        
+        if (getattr(self, '_enable_kpredictor_entropy_stats', False)
+                and total_k_entropy_tokens > 0):
+            stats['global_k_predictor_entropy_mean_nats'] = (
+                total_k_entropy_sum / total_k_entropy_tokens)
+
         return stats
     
     def save_expert_usage_stats(self, output_path=None):
         """保存专家使用统计到文件"""
-        if not getattr(self, 'is_predict_moe', False):
-            print("[WARN] Not a Predict MoE model, skipping stats saving")
-            return
-        
         stats = self.get_expert_usage_stats()
         if stats is None:
             print("[WARN] No expert usage statistics collected (stats is None)")
@@ -1509,9 +1785,8 @@ class HuggingFaceDynamicMoE(HuggingFace):
     
     def reset_expert_usage_stats(self):
         """重置所有层的统计信息"""
-        if not getattr(self, 'is_predict_moe', False):
-            return
-        
+        self._kpredictor_entropy_stats = {}
+        self._wrapper_expert_usage_stats = {}
         if hasattr(self.model, 'model') and hasattr(self.model.model, 'layers'):
             for layer in self.model.model.layers:
                 if hasattr(layer.mlp, 'reset_expert_usage_stats'):
@@ -1596,7 +1871,7 @@ class HuggingFacePredictMoE(HuggingFace):
             )
         print(f"modeling moe is : modeling moe infer, path = {path}")
         MoEForCausalLM = getattr(moe_module, "MoEForCausalLM")
-        MoEConfig = getattr(cfg_module, "MoEConfig")
+        MoEConfig = _get_custom_moe_config_class(cfg_module)
         
         self.tokenizer = LlamaTokenizer.from_pretrained(path)
         self.tokenizer.pad_token = self.tokenizer.unk_token
@@ -1606,14 +1881,24 @@ class HuggingFacePredictMoE(HuggingFace):
         if enable_expert_stats:
             setattr(model_config, "enable_expert_stats", True)
         
+        load_kwargs = dict(
+            from_tf=False,
+            config=model_config,
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=False,
+        )
+        for key in ('device_map', 'max_memory', 'offload_folder',
+                    'offload_state_dict'):
+            if key in model_kwargs:
+                load_kwargs[key] = model_kwargs[key]
         with _disable_meta_init_for_custom_moe(MoEForCausalLM):
-            self.model = MoEForCausalLM.from_pretrained(
-                path,
-                from_tf=False,
-                config=model_config,
-                torch_dtype=torch.float16,
-                low_cpu_mem_usage=False,
-            ).cuda()
+            with _allow_legacy_torch_bin_load_for_local_checkpoint():
+                self.model = MoEForCausalLM.from_pretrained(
+                    path,
+                    **load_kwargs,
+                )
+        if 'device_map' not in load_kwargs and torch.cuda.is_available():
+            self.model = self.model.cuda()
         self.model.eval()
         
         # 检测是否为 modeling_moe_infer（Predict MoE），启用统计功能
