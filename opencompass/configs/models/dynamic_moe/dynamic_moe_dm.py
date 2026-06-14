@@ -16,7 +16,7 @@ models = [
         abbr=model_name,
         path=model_path,
         tokenizer_path=tokenizer_path,
-        moe_package_name='Qwen_MoE',
+        moe_package_name='qwen_moe',
         moe_modeling_module='modeling_moe_dm',
         moe_config_module='configuration_moe_dm',
         max_out_len=128,
@@ -26,7 +26,8 @@ models = [
             torch_dtype=torch.float,
             enable_expert_stats=True,
             enable_kpredictor_entropy_stats=False,
-            enable_theoretical_flops_stats=True,
+            enable_theoretical_flops_stats=False,
+            enable_runtime_tflops_stats=True,
             enable_routing_eval=False,
             enable_token_routing_tsv=False,
             routing_eval_with_layers=False,
@@ -34,7 +35,7 @@ models = [
             routing_eval_top_p=0.7,
             routing_eval_store_token_counts=False,
         ),
-        batch_size=16,
+        batch_size=64,
         run_cfg=dict(num_gpus=1, num_procs=16),
     )
 ]

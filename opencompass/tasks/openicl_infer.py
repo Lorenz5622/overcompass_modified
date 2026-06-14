@@ -35,16 +35,19 @@ class OpenICLInferTask(BaseTask):
         self.num_procs = run_cfg.get('num_procs', 1)
         self.logger = get_logger()
 
-    @staticmethod
-    def _build_expert_stats_path(model_cfg, dataset_cfg):
+    def _build_expert_stats_path(self, model_cfg, dataset_cfg):
         dataset_name = str(dataset_cfg.get('abbr')
                            or dataset_cfg.get('name')
                            or 'dataset')
         dataset_name = dataset_name.replace('/', '_').replace(' ', '_')
         model_abbr = model_abbr_from_cfg(model_cfg)
+        stats_dir = osp.join(self.work_dir, 'stats')
+        mkdir_or_exist(stats_dir)
         if 'reinforce' in str(model_abbr):
-            return f'./expert_usage_stats_reinforce_{dataset_name}.json'
-        return f'./expert_usage_stats_{model_abbr}_{dataset_name}.json'
+            file_name = f'expert_usage_stats_reinforce_{dataset_name}.json'
+        else:
+            file_name = f'expert_usage_stats_{model_abbr}_{dataset_name}.json'
+        return osp.join(stats_dir, file_name)
 
     def get_command(self, cfg_path, template):
         """Get the command template for the task.

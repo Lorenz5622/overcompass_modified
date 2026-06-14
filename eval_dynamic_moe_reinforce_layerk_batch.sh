@@ -11,9 +11,11 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-./outputs/dynamic_moe_reinforce_layerk_batch}"
 EXTRA_ARGS=(--debug)
 
 declare -a EVAL_SPECS=(
-  "/data/cyx/models/reinforce_layerk|/data/cyx/models/reinforce_layerk|piqa_ppl|reinforce_layerk"
-  "/data/cyx/models/reinforce_layerk_siqa|/data/cyx/models/reinforce_layerk_siqa|siqa_ppl|reinforce_layerk"
-  "/data/cyx/models/reinforce_layerk_winogrande|/data/cyx/models/reinforce_layerk_winogrande|winograd_ppl|reinforce_layerk"
+  # "/mnt/data/models/reinforce_layerk_piqa_s2|/mnt/data/models/reinforce_layerk_piqa_s2|piqa_ppl|reinforce_layerk"
+  # "/mnt/data/models/reinforce_layerk_siqa_s2|/mnt/data/models/reinforce_layerk_siqa_s2|siqa_ppl|reinforce_layerk"
+  # "/data/cyx/models/reinforce_layerk_winogrande|/data/cyx/models/reinforce_layerk_winogrande|winograd_ppl|reinforce_layerk"
+  # "/mnt/data/models/reinforce_layerk_arc_e_s2|/mnt/data/models/reinforce_layerk_arc_e_s2|arc_e_ppl|reinforce_layerk"
+  "/mnt/data/models/reinforce_layerk_obqa_s2|/mnt/data/models/reinforce_layerk_obqa_s2|obqa_ppl|reinforce_layerk"
 )
 
 mkdir -p "$LOG_DIR" "$OUTPUT_ROOT"

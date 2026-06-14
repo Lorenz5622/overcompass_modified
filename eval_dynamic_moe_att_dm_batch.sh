@@ -19,7 +19,11 @@ EXTRA_ARGS=(--debug)
 #   数据集为空时默认使用上面的 DATASET
 #   结果名为空时默认使用模型目录名
 declare -a EVAL_SPECS=(
-  # "/data/cyx/models/your_att_dm_ckpt|/data/cyx/models/your_att_dm_ckpt|piqa_ppl|your_att_dm_ckpt"
+  "/mnt/data/models/out_moe_att_arcc|/mnt/data/models/out_moe_att_arcc|arc_c_ppl|att_dm"
+  "/mnt/data/models/out_moe_att_arce|/mnt/data/models/out_moe_att_arce|arc_e_ppl|att_dm"
+  # "/mnt/data/models/out_moe_att_obqa|/mnt/data/models/out_moe_att_obqa|obqa_ppl|att_dm"
+  # "/mnt/data/models/out_moe_att_piqa|/mnt/data/models/out_moe_att_piqa|piqa_ppl|att_dm"
+  # "/mnt/data/models/out_moe_att_siqa|/mnt/data/models/out_moe_att_siqa|siqa_ppl|att_dm"
 )
 # ==========================
 

@@ -1,4 +1,5 @@
 import math
+import time
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -45,8 +46,11 @@ class HuggingFaceDMMoE(HuggingFaceDynamicMoE):
         model_kwargs.setdefault('enable_routing_eval', False)
         self._enable_theoretical_flops_stats = bool(
             model_kwargs.pop('enable_theoretical_flops_stats', True))
+        self._enable_runtime_tflops_stats = bool(
+            model_kwargs.pop('enable_runtime_tflops_stats', False))
         self._dm_router_stats = {}
         self._init_dm_flops_stats()
+        self._init_runtime_profile_stats()
         super().__init__(
             path=path,
             hf_cache_dir=hf_cache_dir,
@@ -71,6 +75,8 @@ class HuggingFaceDMMoE(HuggingFaceDynamicMoE):
             print('[INFO] DM router statistics enabled')
             if self._enable_theoretical_flops_stats:
                 print('[INFO] DM theoretical FLOPs statistics enabled')
+            if self._enable_runtime_tflops_stats:
+                print('[INFO] DM runtime TFLOPS profiling enabled')
 
     def _init_dm_flops_stats(self) -> None:
         self._dm_flops_stats = {
@@ -89,6 +95,81 @@ class HuggingFaceDMMoE(HuggingFaceDynamicMoE):
     def _ensure_dm_flops_stats(self) -> None:
         if not getattr(self, '_dm_flops_stats', None):
             self._init_dm_flops_stats()
+
+    def _init_runtime_profile_stats(self) -> None:
+        self._runtime_profile_stats = {
+            'total_profiled_flops': 0.0,
+            'total_cuda_time_s': 0.0,
+            'total_wall_time_s': 0.0,
+            'num_profiled_batches': 0,
+            'num_profiled_batches_with_flops': 0,
+            'num_profiled_batches_with_cuda_time': 0,
+        }
+
+    def _cuda_synchronize_if_needed(self) -> None:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    def _profile_model_forward(self, tokens: Dict[str, torch.Tensor]):
+        if not self._enable_runtime_tflops_stats:
+            with torch.no_grad():
+                return self.model(
+                    input_ids=tokens['input_ids'],
+                    attention_mask=tokens.get('attention_mask'),
+                    return_dict=False,
+                )
+
+        profiler_module = getattr(torch, 'profiler', None)
+        profile_fn = getattr(profiler_module, 'profile', None)
+        activity_cls = getattr(profiler_module, 'ProfilerActivity', None)
+        if profile_fn is None or activity_cls is None:
+            with torch.no_grad():
+                return self.model(
+                    input_ids=tokens['input_ids'],
+                    attention_mask=tokens.get('attention_mask'),
+                    return_dict=False,
+                )
+
+        activities = [activity_cls.CPU]
+        if torch.cuda.is_available() and hasattr(activity_cls, 'CUDA'):
+            activities.append(activity_cls.CUDA)
+
+        self._cuda_synchronize_if_needed()
+        start_time = time.perf_counter()
+        with profile_fn(
+            activities=activities,
+            with_flops=True,
+            record_shapes=False,
+            profile_memory=False,
+        ) as prof:
+            with torch.no_grad():
+                outputs = self.model(
+                    input_ids=tokens['input_ids'],
+                    attention_mask=tokens.get('attention_mask'),
+                    return_dict=False,
+                )
+        self._cuda_synchronize_if_needed()
+        wall_time_s = time.perf_counter() - start_time
+
+        profiled_flops = 0.0
+        profiled_cuda_time_s = 0.0
+        for event in prof.key_averages():
+            profiled_flops += float(getattr(event, 'flops', 0.0) or 0.0)
+            profiled_cuda_time_s += (
+                float(getattr(event, 'self_cuda_time_total', 0.0) or 0.0)
+                / 1e6
+            )
+
+        self._runtime_profile_stats['total_wall_time_s'] += wall_time_s
+        self._runtime_profile_stats['num_profiled_batches'] += 1
+        if profiled_flops > 0.0:
+            self._runtime_profile_stats['total_profiled_flops'] += profiled_flops
+            self._runtime_profile_stats['num_profiled_batches_with_flops'] += 1
+        if profiled_cuda_time_s > 0.0:
+            self._runtime_profile_stats['total_cuda_time_s'] += profiled_cuda_time_s
+            self._runtime_profile_stats['num_profiled_batches_with_cuda_time'] += 1
+
+        return outputs
 
     @staticmethod
     def _linear_flops(num_rows: int, in_dim: int, out_dim: int) -> float:
@@ -348,13 +429,8 @@ class HuggingFaceDMMoE(HuggingFaceDynamicMoE):
                             make_hook(layer_idx, module)))
 
         try:
-            with torch.no_grad():
-                outputs = self.model(
-                    input_ids=tokens['input_ids'],
-                    attention_mask=tokens.get('attention_mask'),
-                    return_dict=False,
-                )
-                logits = outputs[0]
+            outputs = self._profile_model_forward(tokens)
+            logits = outputs[0]
         finally:
             for hook in hooks:
                 hook.remove()
@@ -390,10 +466,17 @@ class HuggingFaceDMMoE(HuggingFaceDynamicMoE):
         stats['global_cross_attention_router_entropy_mean_bits'] = None
         stats['theoretical_flops_enabled'] = bool(
             self._enable_theoretical_flops_stats)
+        stats['runtime_profile_enabled'] = bool(
+            self._enable_runtime_tflops_stats)
         stats['global_theoretical_flops'] = None
         stats['global_theoretical_flops_per_input_token'] = None
         stats['global_theoretical_flops_per_scored_token'] = None
         stats['global_theoretical_flops_per_sample'] = None
+        stats['global_runtime_profile_flops'] = None
+        stats['global_runtime_profile_cuda_time_s'] = None
+        stats['global_runtime_profile_wall_time_s'] = None
+        stats['global_runtime_profile_tflops'] = None
+        stats['global_runtime_profile_tflops_wall'] = None
 
         total_entropy_sum = 0.0
         total_entropy_tokens = 0
@@ -474,9 +557,34 @@ class HuggingFaceDMMoE(HuggingFaceDynamicMoE):
             if total_samples > 0:
                 stats['global_theoretical_flops_per_sample'] = (
                     total_flops / total_samples)
+        if self._enable_runtime_tflops_stats and self._runtime_profile_stats:
+            total_profiled_flops = float(
+                self._runtime_profile_stats.get('total_profiled_flops', 0.0))
+            total_cuda_time_s = float(
+                self._runtime_profile_stats.get('total_cuda_time_s', 0.0))
+            total_wall_time_s = float(
+                self._runtime_profile_stats.get('total_wall_time_s', 0.0))
+            stats['runtime_profile_num_batches'] = int(
+                self._runtime_profile_stats.get('num_profiled_batches', 0))
+            stats['runtime_profile_num_batches_with_flops'] = int(
+                self._runtime_profile_stats.get(
+                    'num_profiled_batches_with_flops', 0))
+            stats['runtime_profile_num_batches_with_cuda_time'] = int(
+                self._runtime_profile_stats.get(
+                    'num_profiled_batches_with_cuda_time', 0))
+            stats['global_runtime_profile_flops'] = total_profiled_flops
+            stats['global_runtime_profile_cuda_time_s'] = total_cuda_time_s
+            stats['global_runtime_profile_wall_time_s'] = total_wall_time_s
+            if total_profiled_flops > 0.0 and total_cuda_time_s > 0.0:
+                stats['global_runtime_profile_tflops'] = (
+                    total_profiled_flops / total_cuda_time_s / 1e12)
+            if total_profiled_flops > 0.0 and total_wall_time_s > 0.0:
+                stats['global_runtime_profile_tflops_wall'] = (
+                    total_profiled_flops / total_wall_time_s / 1e12)
         return stats
 
     def reset_expert_usage_stats(self):
         self._dm_router_stats = {}
         self._init_dm_flops_stats()
+        self._init_runtime_profile_stats()
         super().reset_expert_usage_stats()
